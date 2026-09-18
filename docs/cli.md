@@ -6,13 +6,15 @@ Use prompt_toolkit for input editing, multiline prompts, history, and command co
 
 Proposed commands: `/help`, `/new`, `/status`, and `/exit` in M1; `/resume`, `/branch`, and explicit restore commands in M2. Input history is a convenience, not the authoritative session store.
 
-Use `PromptSession.prompt_async()` for input. Once submitted, suspend the editable prompt and let Rich own terminal output until the turn completes. Then stop live rendering and restore the prompt. This avoids two concurrent cursor managers. If background messages must appear while editing, route them through one coordinated output path using prompt_toolkit's `patch_stdout`; validate redraw behavior before adding concurrent input during generation. See [prompt_toolkit input documentation](https://python-prompt-toolkit.readthedocs.io/en/stable/pages/asking_for_input.html).
+Interactive chat uses one full-screen `prompt_toolkit.Application` with a persistent transcript, input editor, status footer, and mouse-enabled trace popup. Input becomes read-only during a turn; scrolling and trace inspection remain available. Rich renders Markdown into styled fragments without controlling the terminal. The same answer entry remains visible before and after completion. See [prompt_toolkit application documentation](https://python-prompt-toolkit.readthedocs.io/en/stable/pages/full_screen_apps.html).
+
+Plain mode keeps `PromptSession.prompt_async()` and append-only output. Batch runs retain the Rich renderer.
 
 ## Streaming contract
 
 The model adapter emits text deltas and tool-call fragments. The agent loop assembles each complete tool call, validates its name and arguments, executes it, records the result, and requests the next model response. Never execute partial streamed arguments. Keep reasoning separate from final content when the selected model exposes it.
 
-Only the renderer writes to the terminal. Tools return structured results and captured output. Batch text updates at a modest configurable cadence; keep the durable transcript independent of display refreshes. Begin with a bounded Rich Live region for the current activity and print completed content into terminal scrollback. Limit previews of large outputs and retain full results outside the display. Avoid redrawing an ever-growing transcript. Rich supports explicit refresh control; see [Live display documentation](https://rich.readthedocs.io/en/stable/live.html).
+Only the active UI writes to the terminal. Reasoning and tool traces stream as Markdown previews, collapse when complete, and open in a scrollable popup when clicked. Shell tools emit captured output as available; file-tool results arrive at completion. Tool argument fragments are display-only until the complete call is validated. Completed entries cache their Markdown rendering, and UI refreshes are coalesced. The durable transcript remains independent of display refreshes.
 
 ## Cancellation and failures
 

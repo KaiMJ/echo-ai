@@ -13,6 +13,7 @@ from pathlib import Path
 
 import httpx
 from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Console
@@ -21,31 +22,13 @@ from .agent import Agent
 from .config import Config, state_dir
 from .model import Model
 from .store import Store, workspace_lock
+from .ui import Renderer, plain_requested, safe_text
 
 console = Console(highlight=False)
 
 
-def safe_text(value):
-    """Do not interpret model/tool output as terminal control sequences."""
-    return "".join(
-        c for c in str(value) if c in "\n\t" or (ord(c) >= 32 and not 127 <= ord(c) <= 159)
-    )
-
-
-def render(kind, value):
-    if kind == "text":
-        console.print(safe_text(value), end="", markup=False)
-    elif kind == "tool_start":
-        console.print(f"\n→ {safe_text(value)}", style="cyan", markup=False)
-    elif kind == "tool_end":
-        display = value.get("error") or value.get("output") or value.get("findings") or str(value)
-        if value.get("exit_code"):
-            display = f"Exit {value['exit_code']}\n{display}"
-        if len(display) > 1500:
-            display = display[:1500] + "\n[display truncated; full result saved in session]"
-        console.print(safe_text(display), style="dim", markup=False)
-    elif kind == "child":
-        console.print(f"  Review session: {value}", style="dim", markup=False)
+renderer = Renderer(console)
+render = renderer.emit
 
 
 def make_prompt(root, **kwargs):
@@ -58,6 +41,7 @@ def make_prompt(root, **kwargs):
     return PromptSession(
         history=FileHistory(str(root / "input-history")),
         key_bindings=keys,
+        completer=WordCompleter(["/help", "/diff", "/status", "/exit"]),
         **kwargs,
     )
 
@@ -66,22 +50,35 @@ async def run_turn(agent, prompt):
     task = asyncio.create_task(agent.run(prompt))
     loop = asyncio.get_running_loop()
     loop.add_signal_handler(signal.SIGINT, task.cancel)
+    status = "failed"
+    renderer.start()
     try:
         result = await task
+        status = result.get("status", "completed")
         console.print()
         return result
     except asyncio.CancelledError:
+        status = "cancelled"
         console.print("\nCancelled. Inspect /diff before retrying.", style="yellow")
         return {"status": "cancelled"}
     except (RuntimeError, ValueError, OSError, httpx.HTTPError) as error:
         console.print(f"\nError: {safe_text(error)}", style="red", markup=False)
         return {"status": "failed", "error": str(error)}
     finally:
+        renderer.stop(status)
         loop.remove_signal_handler(signal.SIGINT)
 
 
 async def chat(agent, root):
-    prompt = make_prompt(root)
+    if console.is_terminal and not renderer.plain and not console.is_dumb_terminal:
+        from .terminal import TerminalChat
+
+        await TerminalChat(agent, root, renderer).run()
+        return
+    prompt_options = {}
+    if console.is_terminal and not renderer.plain and not console.is_dumb_terminal:
+        prompt_options["bottom_toolbar"] = renderer.toolbar
+    prompt = make_prompt(root, **prompt_options)
     console.print("Enter sends · Alt+Enter adds a line · Ctrl-C cancels · Ctrl-D exits")
     console.print("/help  /diff  /status  /exit", style="dim")
     while True:
@@ -105,7 +102,9 @@ async def chat(agent, root):
             console.print(safe_text(await asyncio.to_thread(agent.sandbox.diff)), markup=False)
         elif text == "/status":
             console.print(
-                f"Session: {agent.session_id}\nWorkspace: {agent.sandbox.workspace}", markup=False
+                f"Session: {agent.session_id}\nWorkspace: {agent.sandbox.workspace}\n"
+                f"{renderer.main.context_text()}",
+                markup=False,
             )
         elif text.startswith("/"):
             console.print("Unknown command. Use /help.", style="yellow")
@@ -198,6 +197,7 @@ async def execute(args):
                 print(safe_text(patch))
             return 0
         agent = Agent(Model(config), store, sandbox, key, render, child=child)
+        renderer.configure(agent, plain=plain_requested(args))
         console.print(f"Session: {key}", style="bold", markup=False)
         console.print(f"Workspace: {sandbox.workspace}", style="dim", markup=False)
         if args.command == "run":
@@ -221,11 +221,14 @@ def main():
     for command in ("chat", "run"):
         p = sub.add_parser(command)
         p.add_argument("--repo", default=".")
+        p.add_argument("--plain", action="store_true", help="Disable live terminal rendering")
         if command == "run":
             p.add_argument("task")
     for command in ("resume", "diff"):
         p = sub.add_parser(command)
         p.add_argument("session")
+        if command == "resume":
+            p.add_argument("--plain", action="store_true", help="Disable live terminal rendering")
         if command == "diff":
             p.add_argument(
                 "--output", type=Path, help="Save an unmodified patch for review/application"

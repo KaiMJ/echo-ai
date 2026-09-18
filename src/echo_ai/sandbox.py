@@ -7,6 +7,7 @@ resources are bounded, but aggregate workspace disk usage has no filesystem quot
 from __future__ import annotations
 
 import asyncio
+import codecs
 import json
 import os
 import shutil
@@ -190,12 +191,15 @@ class Sandbox:
             name, self._container = self._container, None
             await self._docker("rm", "--force", name)
 
-    async def execute(self, tool: str, args: dict) -> dict:
+    async def execute_stream(self, tool: str, args: dict, on_output) -> dict:
+        return await self.execute(tool, args, on_output=on_output)
+
+    async def execute(self, tool: str, args: dict, *, on_output=None) -> dict:
         async with self._lock:
             try:
                 _workspace_size(self.workspace)
                 await self._start()
-                return await self._execute(tool, args)
+                return await self._execute(tool, args, on_output=on_output)
             except asyncio.CancelledError:
                 await asyncio.shield(self.close())
                 raise
@@ -203,7 +207,7 @@ class Sandbox:
                 await self.close()
                 return {"error": str(exc)}
 
-    async def _execute(self, tool: str, args: dict) -> dict:
+    async def _execute(self, tool: str, args: dict, *, on_output=None) -> dict:
         timeout = min(max(float(args.get("timeout", 60)), 1), 120)
         command = (
             ["bash", "-lc", str(args["command"])]
@@ -225,15 +229,21 @@ class Sandbox:
         proc.stdin.close()
         chunks = bytearray()
         truncated = False
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
         async def collect() -> None:
             nonlocal truncated
             while block := await proc.stdout.read(8192):
                 remaining = MAX_OUTPUT - len(chunks)
-                chunks.extend(block[: max(remaining, 0)])
+                captured = block[: max(remaining, 0)]
+                chunks.extend(captured)
+                if on_output is not None and tool == "bash" and captured:
+                    on_output(decoder.decode(captured))
                 if len(block) > remaining:
                     truncated = True
             await proc.wait()
+            if on_output is not None and tool == "bash":
+                on_output(decoder.decode(b"", final=True))
 
         try:
             await asyncio.wait_for(collect(), timeout)

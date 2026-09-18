@@ -45,9 +45,26 @@ async def test_fragmented_tools_and_usage():
         {"choices": [], "usage": {"prompt_tokens": 20, "completion_tokens": 5}},
     )
     model = Model(Config(), httpx.MockTransport(lambda _: httpx.Response(200, text=body)))
-    message, metrics = await model.complete([], [], lambda *_: None)
+    events = []
+    message, metrics = await model.complete([], [], lambda *event: events.append(event))
     assert json.loads(message["tool_calls"][0]["function"]["arguments"]) == {"path": "a.py"}
     assert metrics["prompt_tokens"] == 20
+    drafts = [value for kind, value in events if kind == "tool_call_delta"]
+    assert drafts[0]["arguments"] == '{"pa'
+    assert drafts[-1] == {"index": 0, "name": "read", "arguments": '{"path":"a.py"}'}
+
+
+async def test_reasoning_is_emitted_and_not_stored_as_content():
+    body = sse(
+        {"choices": [{"delta": {"reasoning": "plan "}}]},
+        {"choices": [{"delta": {"reasoning_content": "then answer"}}]},
+        {"choices": [{"delta": {"content": "done"}, "finish_reason": "stop"}]},
+    )
+    events = []
+    model = Model(Config(), httpx.MockTransport(lambda _: httpx.Response(200, text=body)))
+    message, _ = await model.complete([], [], lambda kind, value: events.append((kind, value)))
+    assert message["content"] == "done"
+    assert events == [("reasoning", "plan "), ("reasoning", "then answer"), ("text", "done")]
 
 
 @pytest.mark.parametrize("ending", [None, "length"])
@@ -152,11 +169,18 @@ async def test_review_child_cannot_mutate(tmp_path):
 async def test_cancel_records_status(tmp_path):
     store = Store(tmp_path / "state.db")
     key = store.create(tmp_path, {})
+    events = []
     with pytest.raises(asyncio.CancelledError):
-        await Agent(FakeModel([asyncio.CancelledError()]), store, FakeSandbox(tmp_path), key).run(
-            "go"
-        )
+        await Agent(
+            FakeModel([asyncio.CancelledError()]),
+            store,
+            FakeSandbox(tmp_path),
+            key,
+            lambda kind, value: events.append((kind, value)),
+        ).run("go")
     assert store.db.execute("SELECT status FROM runs").fetchone()[0] == "cancelled"
+    assert events[-1][0] == "run_end"
+    assert events[-1][1]["status"] == "cancelled"
     store.close()
 
 
@@ -172,12 +196,20 @@ async def test_delegate_links_sessions_and_shares_budget(tmp_path):
             {"role": "assistant", "content": "Review complete"},
         ]
     )
-    result = await Agent(model, store, sandbox, key).run("review")
+    events = []
+    result = await Agent(
+        model, store, sandbox, key, lambda kind, value: events.append((kind, value))
+    ).run("review")
     children = [s for s in store.sessions() if s["parent_id"] == key]
     assert len(children) == 1
     assert result["metrics"]["model_calls"] == 4
     assert result["metrics"]["tool_calls"] == 2
     assert sandbox.calls == [("read", {"path": "a.py"})]
+    assert ("child_task", "Read a.py") in events
+    assert ("child_tool_detail", {"name": "read", "args": {"path": "a.py"}}) in events
+    child_end = next(value for kind, value in events if kind == "child_run_end")
+    assert child_end["status"] == "completed"
+    assert events[-1][0] == "run_end"
     store.close()
 
 

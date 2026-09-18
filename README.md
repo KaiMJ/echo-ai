@@ -40,6 +40,26 @@ uv run echo-ai chat --repo .
 *   `Ctrl-D`: Exit.
 *   Commands: `/help`, `/status`, `/diff`, `/exit`.
 
+Interactive chat uses one persistent, scrollable transcript with Markdown for
+answers, reasoning, and tool traces. Answers stay in place when generation finishes.
+Reasoning and tool previews collapse when finished; click their header to open a
+scrollable detail popup, then press `Esc` to close it. `F2` opens the latest trace.
+Use the mouse wheel or `PgUp`/`PgDn` to browse and `Ctrl-End` to follow new output.
+The footer stays visible and shows `[used / capacity]` context tokens for the active agent.
+
+Tool arguments stream as the model generates them. Shell output streams as the
+process flushes it; structured file-tool results appear at completion. Trace popups
+retain this chat's reasoning in memory; reasoning is not restored after restarting.
+Tool results and conversation messages remain in the session store.
+
+Context is a character-based estimate before a request, then the server-reported
+prompt token count when available. It is not cumulative token usage or a live
+tokenizer measurement. The call budget is shared with review subagents.
+
+Use `uv run echo-ai chat --repo . --plain` (also available for `run` and `resume`)
+to disable live redraws. Redirected output is automatically append-only. Color
+follows the terminal and respects `NO_COLOR`. Slash commands support Tab completion.
+
 **Automated Mode**
 Run a task without an interactive terminal:
 ```bash

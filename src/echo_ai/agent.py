@@ -81,12 +81,22 @@ class Agent:
                 if self.budget["remaining"] <= 0:
                     raise RuntimeError("Shared model-call budget reached.")
                 self.budget["remaining"] -= 1
+                self.emit(
+                    "model_start",
+                    {
+                        "context_chars": len(json.dumps(messages)),
+                        "context_tokens": config.context_tokens,
+                        "remaining": self.budget["remaining"],
+                        "max_steps": config.max_steps,
+                    },
+                )
                 message, usage = await self.model.complete(messages, self.tools, self.emit)
                 metrics["model_calls"] += 1
                 if metrics["ttft"] is None:
                     metrics["ttft"] = usage.get("ttft")
                 for name in ("prompt_tokens", "completion_tokens"):
                     metrics[name] += usage.get(name, 0)
+                self.emit("model_end", {"usage": usage, "metrics": dict(metrics)})
                 self.store.add(self.session_id, message)
                 calls = message.get("tool_calls", [])
                 if not calls:
@@ -110,6 +120,7 @@ class Agent:
                             raise ValueError(f"Unknown or unavailable tool: {name}")
                         args = json.loads(call["function"]["arguments"])
                         validate(args, schema)
+                        self.emit("tool_detail", {"name": name, "args": args})
                         if name == "delegate":
                             result = await self.delegate(args["task"])
                             for metric in (
@@ -121,7 +132,13 @@ class Agent:
                             ):
                                 metrics[metric] += result.get("metrics", {}).get(metric, 0)
                         else:
-                            result = await self.sandbox.execute(name, args)
+                            streaming = getattr(self.sandbox, "execute_stream", None)
+                            if streaming is not None:
+                                result = await streaming(
+                                    name, args, lambda text: self.emit("tool_output", text)
+                                )
+                            else:
+                                result = await self.sandbox.execute(name, args)
                     except (ValueError, ValidationError, OSError, RuntimeError) as error:
                         result = {"error": str(error)[:2000]}
                     metrics["tool_seconds"] += time.monotonic() - tool_started
@@ -140,12 +157,14 @@ class Agent:
             metrics["seconds"] = time.monotonic() - started
             self.store.finish(run_id, status, metrics)
             self.store.recover(self.session_id)
+            self.emit("run_end", {"status": status, "metrics": dict(metrics)})
 
     async def delegate(self, task):
         child_id = self.store.create(
             self.sandbox.workspace, asdict(self.model.config), self.session_id
         )
         self.emit("child", child_id)
+        self.emit("child_task", task)
         child = Agent(
             self.model,
             self.store,

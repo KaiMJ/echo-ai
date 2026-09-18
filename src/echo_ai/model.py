@@ -37,7 +37,7 @@ class Model:
                     "temperature": self.config.temperature,
                     "top_p": self.config.top_p,
                     "top_k": self.config.top_k,
-                    "chat_template_kwargs": {"enable_thinking": False},
+                    "chat_template_kwargs": {"enable_thinking": True},
                 },
             ) as response,
         ):
@@ -54,6 +54,11 @@ class Model:
                 usage = chunk.get("usage") or usage
                 for choice in chunk.get("choices", []):
                     delta = choice.get("delta", {})
+                    reasoning = delta.get("reasoning") or delta.get("reasoning_content") or ""
+                    if reasoning:
+                        if first_token is None:
+                            first_token = time.monotonic() - started
+                        emit("reasoning", reasoning)
                     content = delta.get("content") or ""
                     if content:
                         if first_token is None:
@@ -77,6 +82,7 @@ class Model:
                         function = fragment.get("function", {})
                         call["function"]["name"] += function.get("name") or ""
                         call["function"]["arguments"] += function.get("arguments") or ""
+                        emit("tool_call_delta", {"index": index, **call["function"]})
                     reason = choice.get("finish_reason")
                     if reason:
                         if reason not in ("stop", "tool_calls"):
