@@ -97,6 +97,8 @@ def _copy_repository(repo: Path, workspace: Path, max_bytes: int) -> None:
 
 
 class Sandbox:
+    mode = "sandbox"
+
     def __init__(self, workspace: Path, config: Config | None = None):
         self.config = config or Config()
         self.workspace = workspace.resolve()
@@ -213,7 +215,7 @@ class Sandbox:
     async def execute(self, tool: str, args: dict, *, on_output=None) -> dict:
         async with self._lock:
             try:
-                _workspace_size(self.workspace, self.config.max_workspace_bytes)
+                self.check_size()
                 await self._start()
                 return await self._execute(tool, args, on_output=on_output)
             except asyncio.CancelledError:
@@ -223,17 +225,16 @@ class Sandbox:
                 await self.close()
                 return {"error": str(exc)}
 
-    async def _execute(self, tool: str, args: dict, *, on_output=None) -> dict:
-        timeout = min(
-            max(float(args.get("timeout", self.config.tool_timeout)), 1),
-            self.config.tool_max_timeout,
-        )
+    def check_size(self):
+        _workspace_size(self.workspace, self.config.max_workspace_bytes)
+
+    async def _spawn(self, tool, args):
         command = (
             ["bash", "-lc", str(args["command"])]
             if tool == "bash"
             else ["python", "/opt/echo_sandbox.py", "--tool", tool]
         )
-        proc = await asyncio.create_subprocess_exec(
+        return await asyncio.create_subprocess_exec(
             "docker",
             "exec",
             "-i",
@@ -243,9 +244,20 @@ class Sandbox:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
-        proc.stdin.write(json.dumps(args).encode() if tool != "bash" else b"")
-        await proc.stdin.drain()
-        proc.stdin.close()
+
+    async def _execute(self, tool: str, args: dict, *, on_output=None) -> dict:
+        timeout = min(
+            max(float(args.get("timeout", self.config.tool_timeout)), 1),
+            self.config.tool_max_timeout,
+        )
+        proc = await self._spawn(tool, args)
+        try:
+            proc.stdin.write(json.dumps(args).encode() if tool != "bash" else b"")
+            await proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            proc.stdin.close()
         chunks = bytearray()
         truncated = False
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
@@ -282,7 +294,7 @@ class Sandbox:
         output = chunks.decode(errors="replace")
         if truncated:
             output += "\n[output truncated]"
-        _workspace_size(self.workspace, self.config.max_workspace_bytes)
+        self.check_size()
         if tool != "bash" and not truncated:
             try:
                 return json.loads(output)
@@ -293,7 +305,7 @@ class Sandbox:
     def diff(self) -> str:
         # Include new files without changing the baseline. Configuration and hooks
         # live outside the writable container mount.
-        _workspace_size(self.workspace, self.config.max_workspace_bytes)
+        self.check_size()
         _git(self.workspace, "add", "--all")
         return _git(
             self.workspace,

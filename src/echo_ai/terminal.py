@@ -11,12 +11,13 @@ from pathlib import PurePath
 
 import httpx
 from prompt_toolkit import Application
-from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import ANSI, to_formatted_text
 from prompt_toolkit.formatted_text.utils import split_lines
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import (
     ConditionalContainer,
     Float,
@@ -27,6 +28,7 @@ from prompt_toolkit.layout import (
     Window,
 )
 from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
+from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.layout.utils import explode_text_fragments
 from prompt_toolkit.mouse_events import MouseButton, MouseEventType
 from prompt_toolkit.styles import Style
@@ -36,7 +38,20 @@ from rich.markdown import Markdown
 from rich.syntax import Syntax
 from rich.text import Text
 
+from .commands import (
+    CommandCompleter,
+    help_text,
+    sessions_panel,
+    sessions_text,
+    status_panel,
+    status_text,
+)
 from .ui import safe_text
+
+# prompt_toolkit has no Ctrl+Shift+letter key token. Reserve F24 internally for
+# the CSI-u / modifyOtherKeys sequences terminals can forward for Ctrl+Shift+C.
+for sequence in ("\x1b[99;6u", "\x1b[67;6u", "\x1b[27;6;99~", "\x1b[27;6;67~"):
+    ANSI_SEQUENCES[sequence] = Keys.F24
 
 
 def fit_text(value, width):
@@ -48,7 +63,7 @@ def fit_text(value, width):
 
 def key_highlights(value, width):
     text = fit_text(value, width)
-    keys = r"(Ctrl\+Shift\+C|Ctrl-End|Ctrl-C|Alt\+Enter|Alt\+[dy]|PgUp/PgDn|Enter|Esc|F[123])"
+    keys = r"(Ctrl\+Shift\+C|Ctrl-End|Ctrl\+[cCdJ]|Alt\+[dy]|PgUp/PgDn|Enter|Esc|F[23])"
     return [
         ("class:key" if re.fullmatch(keys, part) else "class:muted", part)
         for part in re.split(keys, text)
@@ -66,6 +81,7 @@ class Entry:
     status: str = ""
     tool: str = ""
     path: str = ""
+    renderable: object = None
     cache_key: tuple | None = None
     cache: list = field(default_factory=list)
 
@@ -85,7 +101,9 @@ class Entry:
                 color_system="standard",
                 highlight=False,
             )
-            if self.kind == "tool":
+            if self.renderable is not None:
+                console.print(self.renderable)
+            elif self.kind == "tool":
                 if self.detail:
                     console.print(Text("Arguments", style="dim"))
                     console.print(
@@ -126,12 +144,15 @@ class TranscriptControl(UIControl):
         self.offset = 0
         self.follow = True
         self.visible = []
-        self.total = self.height = 0
+        self.total = self.height = self.width = 0
         self.rows = []
         self.selection_rows = None
         self.anchor = self.selection_end = None
         self.dragging = False
         self.selection_follow = True
+        self.block_text = None
+        self.block_entry = None
+        self.toggle_on_release = False
 
     def clear_selection(self):
         if self.selection_rows is not None:
@@ -139,8 +160,12 @@ class TranscriptControl(UIControl):
         self.selection_rows = None
         self.anchor = self.selection_end = None
         self.dragging = False
+        self.block_text = None
+        self.block_entry = None
 
     def selected_text(self):
+        if self.block_text is not None:
+            return self.block_text
         if self.anchor is None or self.anchor == self.selection_end:
             return ""
         start, end = sorted((self.anchor, self.selection_end))
@@ -155,7 +180,15 @@ class TranscriptControl(UIControl):
         return "\n".join(lines)
 
     def selected_line(self, i):
-        fragments = self.visible[i][0]
+        fragments = list(self.visible[i][0])
+        # Give blank rows and trailing space mouse coordinates in the Window map.
+        padding = max(0, self.width - sum(Text(part[1]).cell_len for part in fragments))
+        background = (
+            next((part for part in fragments[0][0].split() if part.startswith("class:turn-")), "")
+            if fragments
+            else ""
+        )
+        fragments.append((background, " " * padding))
         if self.anchor is None:
             return fragments
         start, end = sorted((self.anchor, self.selection_end))
@@ -175,12 +208,29 @@ class TranscriptControl(UIControl):
     def is_focusable(self):
         return True
 
+    def select_entry(self, entry):
+        self.clear_selection()
+        self.create_content(self.width or 80, self.height or 30)
+        indices = [i for i, (_, owner) in enumerate(self.rows) if owner is entry]
+        if not indices:
+            return
+        self.selection_rows = self.rows
+        self.selection_follow = self.follow
+        self.follow = False
+        self.anchor = (indices[0], 0)
+        last = indices[-1]
+        self.selection_end = (last, len("".join(p[1] for p in self.rows[last][0])))
+        self.block_text = self.chat.entry_text(entry)
+        self.block_entry = entry
+        self.chat.app.invalidate()
+
     def scroll(self, amount):
         self.follow = False
         self.offset = max(0, min(max(0, self.total - self.height), self.offset + amount))
         self.chat.app.invalidate()
 
     def create_content(self, width, height):
+        self.width = width
         rows = []
         if self.chat.copy_mode:
             entries = [self.chat.copy_selected] if self.popup else self.chat.copy_entries
@@ -197,6 +247,7 @@ class TranscriptControl(UIControl):
         for entry in entries:
             if entry is None:
                 continue
+            first_row = len(rows)
             style = "class:heading" if entry.kind == "text" else "class:muted"
             if entry.kind == "user":
                 style = "class:accent"
@@ -222,15 +273,20 @@ class TranscriptControl(UIControl):
                     icon = [("class:success", "✓ ")]
             available = max(0, width - (2 if icon else 0))
             title = fit_text(entry.title, max(0, available - suffix_width)) + suffix
-            rows.append(
-                (icon + [(style, fit_text(title, available))], entry if entry.expandable else None)
-            )
+            rows.append((icon + [(style, fit_text(title, available))], entry))
             if self.popup or not entry.expandable or not entry.done:
                 lines = entry.markdown_lines(max(1, width - 1))
                 if entry.expandable and not self.popup:
                     lines = lines[-6:]
-                rows.extend((line, None) for line in lines)
+                rows.extend((line, entry) for line in lines)
             rows.append(([("", "")], None))
+            background = "class:turn-user" if entry.kind == "user" else "class:turn-echo"
+            for index in range(first_row, len(rows)):
+                fragments, owner = rows[index]
+                rows[index] = (
+                    [(background + " " + style, text) for style, text, *_ in fragments],
+                    owner,
+                )
         if self.selection_rows is not None:
             rows = self.selection_rows
         self.rows = rows
@@ -252,7 +308,10 @@ class TranscriptControl(UIControl):
         elif event.button == MouseButton.LEFT and event.event_type == MouseEventType.MOUSE_DOWN:
             if not self.visible:
                 return
+            clicked = self.visible[min(max(event.position.y, 0), len(self.visible) - 1)][1]
+            toggle = self.block_entry is not None and clicked is self.block_entry
             self.clear_selection()
+            self.toggle_on_release = toggle
             self.selection_rows = self.rows
             self.selection_follow = self.follow
             self.follow = False
@@ -268,17 +327,23 @@ class TranscriptControl(UIControl):
                     return
                 self.dragging = False
                 if self.anchor != self.selection_end:
+                    self.toggle_on_release = False
                     return
                 self.clear_selection()
+                if self.toggle_on_release:
+                    self.toggle_on_release = False
+                    self.chat.app.invalidate()
+                    return
             if event.event_type != MouseEventType.MOUSE_UP:
                 return NotImplemented
             if 0 <= event.position.y < len(self.visible):
                 entry = self.visible[event.position.y][1]
                 if entry:
-                    if self.popup:
-                        self.chat.close_details()
-                    else:
+                    if entry.expandable and not self.popup:
                         self.chat.open_details(entry)
+                        self.chat.details.select_entry(entry)
+                    else:
+                        self.select_entry(entry)
         else:
             return NotImplemented
 
@@ -303,14 +368,24 @@ class TerminalChat:
             multiline=True,
             height=3,
             history=FileHistory(str(root / "input-history")),
-            completer=WordCompleter(["/help", "/diff", "/status", "/details", "/copy", "/exit"]),
-            read_only=Condition(lambda: self.busy or self.copy_mode),
+            completer=CommandCompleter(),
+            read_only=Condition(lambda: self.copy_mode),
+            focus_on_click=True,
             style="class:composer",
         )
         keys = KeyBindings()
 
         @keys.add("enter")
         def submit(event):
+            if self.editor.buffer.complete_state:
+                completion = (
+                    self.editor.buffer.complete_state.current_completion
+                    or self.editor.buffer.complete_state.completions[0]
+                )
+                already_complete = completion.text == self.editor.text
+                self.editor.buffer.apply_completion(completion)
+                if not already_complete:
+                    return
             if self.copy_mode:
                 self.toggle_copy()
             elif self.selected:
@@ -322,9 +397,9 @@ class TerminalChat:
                     self.editor.text = ""
                     self.task = self.app.create_background_task(self.submit(text))
 
-        @keys.add("escape", "enter")
+        @keys.add("c-j")
         def newline(event):
-            if not self.busy and not self.selected and not self.copy_mode:
+            if not self.selected and not self.copy_mode:
                 self.editor.buffer.insert_text("\n")
 
         @keys.add("escape")
@@ -345,9 +420,13 @@ class TerminalChat:
             else:
                 self.latest_details()
 
-        @keys.add("f1")
-        def help_view(event):
-            self.open_details(self.help_entry())
+        @keys.add("c-c")
+        def copy_latest(event):
+            self.copy_output()
+
+        @keys.add("f24")
+        def copy_all(event):
+            self.copy_output(all_entries=True)
 
         @keys.add("f3")
         @keys.add("escape", "y")
@@ -370,17 +449,6 @@ class TerminalChat:
             control.clear_selection()
             control.follow = True
 
-        @keys.add("c-c")
-        def cancel(event):
-            if self.copy_selection():
-                return
-            if self.selected:
-                self.close_details()
-            elif self.busy:
-                self.task.cancel()
-            else:
-                self.editor.text = ""
-
         @keys.add("c-d")
         def exit_app(event):
             if self.busy:
@@ -401,7 +469,13 @@ class TerminalChat:
                     height=1,
                     style="class:muted",
                 ),
-                VSplit([Window(width=2), self.editor, Window(width=2)]),
+                VSplit(
+                    [
+                        Window(width=2),
+                        Frame(self.editor, style="class:composer-box"),
+                        Window(width=2),
+                    ]
+                ),
                 status,
             ]
         )
@@ -410,7 +484,11 @@ class TerminalChat:
             filter=Condition(lambda: self.selected is not None),
         )
         layout = FloatContainer(
-            body, floats=[Float(content=popup, left=2, right=2, top=2, bottom=2)]
+            body,
+            floats=[
+                Float(content=popup, left=2, right=2, top=2, bottom=2),
+                Float(xcursor=True, ycursor=True, content=CompletionsMenu(max_height=10)),
+            ],
         )
         self.app = Application(
             layout=Layout(layout, focused_element=self.editor),
@@ -432,13 +510,17 @@ class TerminalChat:
                     "success": "ansigreen",
                     "key": "ansicyan bold",
                     "selection": "reverse",
-                    "composer": "",
+                    "composer": "bg:#262626 #eeeeee",
+                    "turn-user": "bg:#383838 #eeeeee",
+                    "turn-echo": "bg:#303030 #eeeeee",
+                    "composer-box": "bg:#262626 #eeeeee",
+                    "composer-box frame.border": "#555555 bg:#262626",
                     "frame.border": "ansibrightblack",
                     "frame.label": "bold",
                 }
             ),
         )
-        # Resolve standalone Esc promptly while leaving time for Alt+Enter sequences.
+        # Resolve standalone Esc promptly while leaving time for Alt key sequences.
         self.app.ttimeoutlen = 0.1
         self.app.timeoutlen = 0.5
 
@@ -450,7 +532,7 @@ class TerminalChat:
         if self.copy_mode:
             return self.copy_status
         self.renderer.console.width = self.app.output.get_size().columns
-        return self.renderer.toolbar(streaming=self.busy)
+        return self.renderer.toolbar(streaming=self.busy).replace("Ctrl-C cancel", "Ctrl+d stop")
 
     def spinner(self):
         moment = self.copy_time if self.copy_mode else time.monotonic()
@@ -475,11 +557,37 @@ class TerminalChat:
         text = control.selected_text()
         if not text:
             return False
+        self.copy_text(text)
+        return True
+
+    @staticmethod
+    def entry_text(entry):
+        return "\n\n".join(part for part in (entry.detail, entry.text) if part)
+
+    def copy_output(self, *, all_entries=False):
+        entries = self.copy_entries if self.copy_mode else self.entries
+        if all_entries:
+            text = "\n\n".join(
+                f"{'user' if entry.kind == 'user' else 'echo'}:\n"
+                + json.dumps(entry.text, ensure_ascii=False)
+                for entry in entries
+                if entry.kind in {"user", "text"}
+            )
+        else:
+            if self.copy_selection():
+                return
+            entry = (self.copy_selected if self.copy_mode else self.selected) or next(
+                (entry for entry in reversed(entries) if entry.kind == "text"), None
+            )
+            text = self.entry_text(entry) if entry else ""
+        if text:
+            self.copy_text(text)
+
+    def copy_text(self, text):
         # OSC 52 targets the user's terminal clipboard, including over SSH.
         payload = base64.b64encode(text.encode()).decode("ascii")
         self.app.output.write_raw(f"\x1b]52;c;{payload}\x07")
         self.app.output.flush()
-        return True
 
     def latest_details(self):
         entry = next((e for e in reversed(self.entries) if e.expandable), None)
@@ -500,51 +608,37 @@ class TerminalChat:
     def composer_hint(self):
         width = self.app.output.get_size().columns
         if self.copy_mode:
-            hint = "Esc resume · Select text · Ctrl+Shift+C copy"
+            hint = "Esc resume · Select text with your terminal"
         elif (self.details if self.selected else self.transcript).selected_text():
-            hint = "Ctrl-C copy selection · Esc clear · Alt+y native copy"
+            hint = "Ctrl+c  Copy selection    Ctrl+Shift+C  Copy conversation    Esc  Clear"
         elif self.selected:
-            hint = "Esc close · Alt+y native copy · PgUp/PgDn scroll"
-        elif not self.transcript.follow:
-            hint = "History · Ctrl-End follows latest output"
-        elif self.busy:
-            hint = "Working · Ctrl-C cancel · Alt+d details · Alt+y copy"
-        elif width < 40:
-            hint = "Enter send · /copy"
-        elif width < 65:
-            hint = "Enter send · /copy · /help"
+            hint = "Ctrl+c  Copy section    Esc  Close"
         else:
-            hint = "Enter send · Alt+Enter newline · Alt+d details · Alt+y copy · F1 help"
-        return key_highlights(f" ── {hint} ", width)
+            hint = "Enter  Send    Ctrl+J  New line"
+            if width >= 70:
+                hint += "    Ctrl+d  Stop" if self.busy else "    /help  Commands"
+            if self.busy and width >= 100:
+                hint += "    Draft while Echo works"
+        return key_highlights(f"  {hint}", width)
 
     def details_title(self):
         width = max(1, self.app.output.get_size().columns - 10)
         title = (
             "Esc resume · Select text · Ctrl+Shift+C copy"
             if self.copy_mode
-            else "Trace details · Ctrl-C copy selection · Alt+y native copy · Esc close"
+            else "Trace details · Ctrl+c copy · Ctrl+Shift+C copy all · Esc close"
         )
         return key_highlights(title, width)
 
     def help_entry(self):
         return Entry(
             "notice",
-            "Help · Esc close",
-            "**Write**  Enter sends; Alt+Enter adds a line.\n\n"
-            "**Inspect**  Click a reasoning or tool row, or use Alt+d, F2, or /details. "
-            "Esc closes details.\n\n"
-            "**Navigate**  Mouse wheel or PgUp/PgDn scrolls; Ctrl-End follows new output.\n\n"
-            "**Select**  Drag across the transcript or details to highlight text. Ctrl-C "
-            "requests copying through your terminal's OSC 52 clipboard support. "
-            "Esc clears the selection.\n\n"
-            "**Native copy**  If clipboard copying is unsupported, use /copy, Alt+y, or F3. "
-            "This freezes the view and releases the mouse to your terminal. "
-            "Drag to select, then use your terminal's copy shortcut (usually Ctrl+Shift+C "
-            "on Linux or Cmd+C on macOS). F3 or Esc resumes live updates. "
-            "In many terminals, Shift+drag also selects without entering copy mode.\n\n"
-            "**Stop**  Ctrl-C cancels a running turn or clears the prompt. "
-            "Ctrl-D exits when idle.\n\n"
-            "**Commands**  /help · /diff · /status · /details · /copy · /exit",
+            "Commands · Esc close",
+            "```text\n" + help_text() + "\n```\n\n"
+            "**Enter** Send · **Ctrl+J** New line · **Ctrl+c** Copy selection or latest answer\n\n"
+            "**Ctrl+Shift+C** Copy conversation · **Ctrl+d** Stop / exit\n\n"
+            "Click a section or drag to select. Ctrl+Shift+C requires your terminal to forward "
+            "the shortcut (CSI-u or modifyOtherKeys).",
         )
 
     def add(self, kind, title, text="", **kwargs):
@@ -659,30 +753,32 @@ class TerminalChat:
         if text == "/help":
             self.open_details(self.help_entry())
             return
-        if text == "/details":
-            self.latest_details()
-            return
-        if text == "/copy":
-            self.toggle_copy()
-            return
         if text == "/status":
-            reasoning_policy = (
-                "Input includes saved reasoning traces sent back to the model. "
-                if self.renderer.active.return_reasoning
-                else "Input excludes saved reasoning traces; they are not sent back to the model. "
-            )
             self.add(
                 "notice",
                 "Status",
-                f"Session: {self.agent.session_id}\n\n"
-                f"Workspace: {self.agent.sandbox.workspace}\n\n"
-                f"{self.renderer.active_context_text()}\n\n"
-                f"{self.renderer.active.generated_text(detailed=True)}\n\n"
-                f"Input counts the latest request. {reasoning_policy}"
-                "Gen counts generated thinking, answer, and tool-call tokens for that request. "
-                "~ marks a character-based estimate until server usage arrives. "
-                "Completed reasoning traces are saved locally in either mode.",
+                status_text(self.agent, self.renderer),
+                renderable=status_panel(self.agent, self.renderer),
             )
+            return
+        if text == "/sessions" or text.startswith("/sessions "):
+            try:
+                session = self.agent.store.session(self.agent.session_id)
+                if text == "/sessions":
+                    listing = sessions_text(self.agent.store, session["repo"])
+                    self.add(
+                        "notice",
+                        "Sessions",
+                        listing,
+                        renderable=sessions_panel(
+                            self.agent.store, session["repo"], current=self.agent.session_id
+                        ),
+                    )
+                else:
+                    target = self.agent.store.resolve(text.split(maxsplit=1)[1], session["repo"])
+                    self.app.exit(result=target["id"])
+            except ValueError as error:
+                self.add("notice", "Error", str(error))
             return
         if text == "/diff":
             try:
@@ -690,7 +786,7 @@ class TerminalChat:
                 self.add(
                     "notice",
                     "Changes",
-                    "```diff\n" + patch + "\n```" if patch.strip() else "No sandbox changes yet.",
+                    "```diff\n" + patch + "\n```" if patch.strip() else "No changes yet.",
                 )
             except (RuntimeError, ValueError, OSError) as error:
                 self.add("notice", "Error", str(error))
@@ -719,9 +815,16 @@ class TerminalChat:
             self.app.invalidate()
 
     async def run(self):
+        if hasattr(self.agent, "store"):
+            for message in self.agent.store.messages(self.agent.session_id):
+                if message["role"] in {"user", "assistant"} and message.get("content"):
+                    user = message["role"] == "user"
+                    self.add(
+                        "user" if user else "text", "You" if user else "Echo", message["content"]
+                    )
         self.renderer.event_handler = self.on_event
         try:
-            await self.app.run_async()
+            return await self.app.run_async()
         finally:
             if self.busy:
                 self.task.cancel()

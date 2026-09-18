@@ -168,7 +168,7 @@ def test_spinner_animates_and_stops_on_completion(chat, monkeypatch):
     assert lines(chat.transcript)[0] != before
     chat.renderer.emit("tool_end", {"output": "file.md"})
     assert lines(chat.transcript)[0].startswith("✓ ")
-    assert any(style == "class:key" and text == "Alt+y" for style, text in chat.composer_hint())
+    assert any(style == "class:key" and text == "Ctrl+J" for style, text in chat.composer_hint())
 
 
 def test_drag_highlights_and_copies_without_opening_details(chat):
@@ -198,13 +198,14 @@ def test_drag_highlights_and_copies_without_opening_details(chat):
     assert "streamed later" in "\n".join(lines(chat.transcript))
 
 
-async def test_details_and_copy_commands_do_not_need_function_keys(chat):
-    chat.renderer.emit("reasoning", "Inspect first")
-    await chat.submit("/details")
-    assert chat.selected is chat.entries[0]
-    chat.close_details()
-    await chat.submit("/copy")
-    assert chat.copy_mode and not chat.app.mouse_support()
+@pytest.mark.parametrize("command", ["/keys", "/details", "/copy", "/status details"])
+async def test_removed_commands(chat, command):
+    from echo_ai.commands import COMMANDS
+
+    assert command not in COMMANDS
+    await chat.submit(command)
+    assert chat.entries[-1].title == "Unknown command"
+    assert chat.selected is None and not chat.copy_mode
 
 
 def test_reverse_multiline_drag_in_details_preserves_unicode(chat):
@@ -252,12 +253,17 @@ asyncio.run(chat(Agent(), Path(sys.argv[1])))
     )
     try:
         process.expect("echo ›")
-        process.send("first\x1b\rsecond\r")
+        process.send("first\nsecond\r")
         process.expect("Answer ready")
         # Drag over the answer, then copy without cancelling or closing the view.
         process.send("\x1b[<0;3;8M\x1b[<32;9;8M\x1b[<0;9;8m")
-        process.sendcontrol("c")
+        process.send("\x03")
         process.expect_exact("\x1b]52;c;QW5zd2Vy\x07")  # "Answer", base64 encoded.
+        process.send("\x1b")
+        # Start on a blank row, beyond its text, and drag back into the answer.
+        process.send("\x1b[<0;23;9M\x1b[<32;3;8M\x1b[<0;3;8m")
+        process.send("\x03")
+        process.expect_exact("\x1b]52;c;QW5zd2VyIHJlYWR5Cg==\x07")
         process.send("\x1b")
         # User Markdown is one paragraph (first/second), placing reasoning on row 5.
         process.send("\x1b[<0;5;5M\x1b[<0;5;5m")
@@ -277,9 +283,244 @@ asyncio.run(chat(Agent(), Path(sys.argv[1])))
         process.send("\x1by")
         process.expect_exact("\x1b[?1000h")
         process.send("\x1b")
-        process.sendline("/exit")
+        process.send("/exit\r")
         process.expect(pexpect.EOF)
         process.close()
         assert process.exitstatus == 0
     finally:
         process.close(force=True)
+
+
+def test_selection_paints_empty_rows_without_copying_padding(chat):
+    chat.add("text", "Echo", "Alpha")
+    chat.add("text", "Echo", "Beta")
+    rendered = lines(chat.transcript)
+    first = next(i for i, line in enumerate(rendered) if "Alpha" in line)
+    last = next(i for i, line in enumerate(rendered) if "Beta" in line)
+    control = chat.transcript
+    control.selection_rows = control.rows
+    control.anchor, control.selection_end = (first, 0), (last, 4)
+    content = control.create_content(80, 30)
+    empty = next(i for i in range(first + 1, last) if not rendered[i].strip())
+    assert "".join(part[1] for part in content.get_line(empty)) == " " * 80
+    assert all("class:selection" in part[0] for part in content.get_line(empty))
+    assert "\n\n" in control.selected_text()
+    assert " " * 80 not in control.selected_text()
+
+
+async def test_help_and_formatted_status(chat):
+    await chat.submit("/help")
+    assert "/sessions" in chat.selected.text and "Ctrl+Shift+C" in chat.selected.text
+    chat.close_details()
+    await chat.submit("/status")
+    entry = chat.entries[-1]
+    assert "Session: test" in entry.text and "Input counts" not in entry.text
+    assert entry.renderable is not None
+    rendered = entry.markdown_lines(80)
+    assert entry.renderable.renderable.columns[0].style == "bold cyan"
+    assert any("bold" in part[0] for line in rendered for part in line)
+    assert "Session status" in "\n".join("".join(p[1] for p in line) for line in rendered)
+
+
+async def test_session_list_switch_and_restored_conversation(chat, tmp_path, monkeypatch):
+    from echo_ai.store import Store
+
+    store = Store(tmp_path / "state.db")
+    current = store.create(tmp_path, {}, repo=tmp_path)
+    target = store.create(tmp_path, {}, repo=tmp_path)
+    store.add(current, {"role": "user", "content": "Earlier question"})
+    store.add(current, {"role": "assistant", "content": "Earlier answer"})
+    store.add(target, {"role": "user", "content": "Other task"})
+    chat.agent.store = store
+    chat.agent.session_id = current
+    await chat.submit("/sessions")
+    assert "Other task" in chat.entries[-1].text
+    await chat.submit("/sessions missing")
+    assert chat.entries[-1].title == "Error"
+    results = []
+    monkeypatch.setattr(chat.app, "exit", lambda **kwargs: results.append(kwargs["result"]))
+    await chat.submit("/sessions " + target[:8])
+    assert results == [target]
+
+    async def run_async():
+        assert any(entry.text == "Earlier question" for entry in chat.entries)
+        assert any(entry.text == "Earlier answer" for entry in chat.entries)
+        return target
+
+    monkeypatch.setattr(chat.app, "run_async", run_async)
+    assert await chat.run() == target
+    store.close()
+
+
+def test_command_completion_only_at_prompt_start():
+    from prompt_toolkit.completion import CompleteEvent
+    from prompt_toolkit.document import Document
+
+    from echo_ai.commands import COMMANDS, CommandCompleter
+
+    def suggestions(text):
+        return [c.text for c in CommandCompleter().get_completions(Document(text), CompleteEvent())]
+
+    assert suggestions("/") == list(COMMANDS)
+    assert suggestions("/he") == ["/help"]
+    for text in ("please /", " /", "hello\n/", "/help\n/"):
+        assert suggestions(text) == []
+
+
+@pytest.mark.parametrize("kind", ["user", "text", "tool", "reasoning"])
+def test_click_selects_full_block_and_alt_copy_uses_source(chat, kind):
+    entry = chat.add(
+        kind, "Block", "**Full body**", done=True, detail="arguments" if kind == "tool" else ""
+    )
+    lines(chat.transcript)
+    for event in (MouseEventType.MOUSE_DOWN, MouseEventType.MOUSE_UP):
+        chat.transcript.mouse_handler(MouseEvent(Point(0, 0), event, MouseButton.LEFT, frozenset()))
+    control = chat.details if chat.selected else chat.transcript
+    assert control.selected_text() == chat.entry_text(entry)
+    assert any("class:selection" in p[0] for p in control.create_content(80, 30).get_line(0))
+    copied = []
+    chat.copy_text = copied.append
+    chat.copy_output()
+    assert copied == [chat.entry_text(entry)]
+
+
+def test_copy_latest_and_all_include_full_collapsed_traces(chat):
+    chat.add("user", "You", "Question")
+    chat.add("reasoning", "Reasoning", "Thought", done=True)
+    chat.add("tool", "Tool", "Result", detail="Arguments", done=True)
+    chat.add("text", "Echo", "Answer")
+    copied = []
+    chat.copy_text = copied.append
+    chat.copy_output()
+    assert copied == ["Answer"]
+    chat.copy_output(all_entries=True)
+    assert copied[-1] == 'user:\n"Question"\n\necho:\n"Answer"'
+
+
+def test_drag_starting_on_empty_row(chat):
+    chat.add("text", "Echo", "Alpha\n\nBeta")
+    rendered = lines(chat.transcript)
+    empty = next(i for i, line in enumerate(rendered[1:], 1) if not line.strip())
+    # Blank rows must contain actual cells before selection, for terminal mouse hit testing.
+    assert rendered[empty] == " " * 80
+    for kind, x, y in (
+        (MouseEventType.MOUSE_DOWN, 20, empty),
+        (MouseEventType.MOUSE_MOVE, 4, empty + 1),
+        (MouseEventType.MOUSE_UP, 4, empty + 1),
+    ):
+        chat.transcript.mouse_handler(MouseEvent(Point(x, y), kind, MouseButton.LEFT, frozenset()))
+    assert chat.transcript.selected_text() == "\nBeta"
+
+
+async def test_typing_and_newline_while_streaming_and_slash_menu(tmp_path):
+    import asyncio
+
+    from prompt_toolkit.input import create_pipe_input
+
+    started, finish = asyncio.Event(), asyncio.Event()
+    received = []
+
+    async def run(prompt):
+        received.append(prompt)
+        instance.on_event("text", "Streaming answer")
+        started.set()
+        await finish.wait()
+        return {"status": "completed"}
+
+    async def until(predicate):
+        async with asyncio.timeout(3):
+            while not predicate():
+                await asyncio.sleep(0.01)
+
+    with create_pipe_input() as pipe:
+        agent = SimpleNamespace(session_id="test", run=run)
+        renderer = Renderer(Console(file=StringIO()))
+        instance = TerminalChat(agent, tmp_path, renderer, input=pipe, output=DummyOutput())
+        copied = []
+        instance.copy_text = copied.append
+        task = asyncio.create_task(instance.run())
+        try:
+            await until(lambda: instance.app.is_running)
+            pipe.send_text("first\r")
+            await started.wait()
+            pipe.send_text("draft\nsecond")
+            await until(lambda: instance.editor.text == "draft\nsecond")
+            pipe.send_text("\r")
+            await asyncio.sleep(0.05)
+            assert received == ["first"]
+            assert instance.editor.text == "draft\nsecond"
+            pipe.send_text("\x03")
+            await until(lambda: copied == ["Streaming answer"])
+            pipe.send_text("\x1b[99;6u")
+            await until(lambda: len(copied) == 2)
+            assert copied[-1] == 'user:\n"first"\n\necho:\n"Streaming answer"'
+            finish.set()
+            await until(lambda: not instance.busy)
+            pipe.send_text("\r")
+            await until(lambda: received == ["first", "draft\nsecond"])
+            await until(lambda: not instance.busy)
+            pipe.send_text("/")
+            await until(lambda: instance.editor.buffer.complete_state is not None)
+            assert "/help" in [c.text for c in instance.editor.buffer.complete_state.completions]
+            instance.editor.text = ""
+            pipe.send_text("hello /")
+            await until(lambda: instance.editor.text == "hello /")
+            await asyncio.sleep(0.05)
+            assert instance.editor.buffer.complete_state is None
+        finally:
+            instance.app.exit()
+            await task
+
+
+@pytest.mark.parametrize("kind", ["user", "text", "reasoning", "tool"])
+def test_second_click_clears_block_selection(chat, kind):
+    entry = chat.add(kind, "Block", "Content", done=True)
+    if entry.expandable:
+        chat.open_details(entry)
+    control = chat.details if chat.selected else chat.transcript
+    lines(control)
+    for _ in range(2):
+        for event in (MouseEventType.MOUSE_DOWN, MouseEventType.MOUSE_UP):
+            control.mouse_handler(MouseEvent(Point(0, 0), event, MouseButton.LEFT, frozenset()))
+        if _ == 0:
+            assert control.selected_text() == "Content"
+        else:
+            assert control.selected_text() == ""
+            assert control.selection_rows is None
+            assert not any(
+                "class:selection" in p[0] for p in control.create_content(80, 30).get_line(0)
+            )
+
+
+def test_turn_backgrounds_cover_padding_and_group_echo_entries(chat):
+    chat.add("user", "You", "Question")
+    chat.add("reasoning", "Reasoning", "Thinking", done=True)
+    chat.add("tool", "Tool", "Result", done=True)
+    chat.add("text", "Echo", "Answer")
+    chat.add("user", "You", "Next question")
+    content = chat.transcript.create_content(80, 30)
+    for i, (_, entry) in enumerate(chat.transcript.rows):
+        if entry is not None:
+            expected = "class:turn-user" if entry.kind == "user" else "class:turn-echo"
+            assert all(expected in part[0] for part in content.get_line(i))
+            assert sum(len(part[1]) for part in content.get_line(i)) == 80
+
+
+async def test_sessions_are_formatted_with_current_marker(chat, tmp_path):
+    from echo_ai.store import Store
+
+    store = Store(tmp_path / "sessions.db")
+    try:
+        current = store.create(tmp_path, {}, repo=tmp_path)
+        other = store.create(tmp_path, {}, repo=tmp_path)
+        store.add(other, {"role": "user", "content": "[red]literal title[/red]"})
+        chat.agent.store, chat.agent.session_id = store, current
+        await chat.submit("/sessions")
+        entry = chat.entries[-1]
+        assert entry.renderable is not None
+        rendered = "\n".join("".join(p[1] for p in line) for line in entry.markdown_lines(80))
+        assert "current" in rendered and current in rendered and other in rendered
+        assert "[red]literal title[/red]" in rendered
+        assert "/sessions ID to switch" in rendered
+    finally:
+        store.close()

@@ -8,10 +8,10 @@ from pathlib import Path
 
 
 def _tool(tool: str, args: dict, limits: dict) -> dict:
-    root = Path("/workspace")
+    root = Path(os.environ.get("ECHO_WORKSPACE_ROOT", "/workspace")).resolve()
     path = (root / args.get("path", ".")).resolve()
     if not path.is_relative_to(root):
-        raise ValueError("Path must stay inside /workspace")
+        raise ValueError(f"Path must stay inside {root}")
     if tool == "read":
         offset = max(1, int(args.get("offset", 1)))
         limit = min(

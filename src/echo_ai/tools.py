@@ -54,7 +54,7 @@ TOOLS = [
     ),
     function(
         "bash",
-        "Run bash in the sandbox. Use for tests and repository commands.",
+        "Run bash in the active workspace. Use for tests and repository commands.",
         {
             "command": STRING,
             "timeout": {"type": "integer", "minimum": 1, "maximum": Config().tool_max_timeout},

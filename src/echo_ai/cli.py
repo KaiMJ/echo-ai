@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import signal
@@ -13,16 +14,16 @@ from pathlib import Path
 
 import httpx
 from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Console
 
 from .agent import Agent
+from .commands import CommandCompleter, help_text, sessions_panel, status_panel
 from .config import Config, state_dir
 from .model import Model
 from .store import Store, workspace_lock
-from .ui import Renderer, plain_requested, safe_text
+from .ui import Renderer, safe_text
 
 console = Console(highlight=False)
 
@@ -34,14 +35,14 @@ render = renderer.emit
 def make_prompt(root, **kwargs):
     keys = KeyBindings()
 
-    @keys.add("escape", "enter")
+    @keys.add("c-j")
     def newline(event):
         event.current_buffer.insert_text("\n")
 
     return PromptSession(
         history=FileHistory(str(root / "input-history")),
         key_bindings=keys,
-        completer=WordCompleter(["/help", "/diff", "/status", "/exit"]),
+        completer=CommandCompleter(),
         **kwargs,
     )
 
@@ -73,13 +74,12 @@ async def chat(agent, root):
     if console.is_terminal and not renderer.plain and not console.is_dumb_terminal:
         from .terminal import TerminalChat
 
-        await TerminalChat(agent, root, renderer).run()
-        return
+        return await TerminalChat(agent, root, renderer).run()
     prompt_options = {}
     if console.is_terminal and not renderer.plain and not console.is_dumb_terminal:
         prompt_options["bottom_toolbar"] = renderer.toolbar
     prompt = make_prompt(root, **prompt_options)
-    console.print("Enter sends · Alt+Enter adds a line · Ctrl-C cancels · Ctrl-D exits")
+    console.print("Enter sends · Ctrl+J adds a line · Ctrl-C cancels · Ctrl-D exits")
     console.print("/help  /diff  /status  /exit", style="dim")
     while True:
         try:
@@ -93,38 +93,44 @@ async def chat(agent, root):
         if text == "/exit":
             break
         if text == "/help":
-            console.print(
-                "Describe a coding task. Changes stay in the disposable workspace.\n"
-                "/diff shows changes; /status shows session; /exit saves and exits.\n"
-                "Resume later with: echo-ai resume SESSION"
-            )
+            console.print(help_text(), markup=False)
+        elif text == "/sessions":
+            session = agent.store.session(agent.session_id)
+            console.print(sessions_panel(agent.store, session["repo"], current=agent.session_id))
+        elif text.startswith("/sessions "):
+            try:
+                session = agent.store.session(agent.session_id)
+                target = agent.store.resolve(text.split(maxsplit=1)[1], session["repo"])
+                return target["id"]
+            except ValueError as error:
+                console.print(str(error), markup=False)
         elif text == "/diff":
-            console.print(safe_text(await asyncio.to_thread(agent.sandbox.diff)), markup=False)
+            try:
+                console.print(safe_text(await asyncio.to_thread(agent.sandbox.diff)), markup=False)
+            except (RuntimeError, ValueError, OSError) as error:
+                console.print(str(error), markup=False)
         elif text == "/status":
-            console.print(
-                f"Session: {agent.session_id}\nWorkspace: {agent.sandbox.workspace}\n"
-                f"{renderer.main.context_text()}",
-                markup=False,
-            )
+            console.print(status_panel(agent, renderer))
         elif text.startswith("/"):
             console.print("Unknown command. Use /help.", style="yellow")
         else:
             await run_turn(agent, text)
 
 
-async def doctor(config):
+async def doctor(config, *, sandbox=False):
     checks = []
-    result = await asyncio.to_thread(
-        subprocess.run, ["docker", "info"], capture_output=True, text=True
-    )
-    checks.append(("Docker daemon", result.returncode == 0))
-    result = await asyncio.to_thread(
-        subprocess.run,
-        ["docker", "image", "inspect", "echo-ai-sandbox:local"],
-        capture_output=True,
-        text=True,
-    )
-    checks.append(("Sandbox image", result.returncode == 0))
+    if sandbox:
+        for label, command in (
+            ("Docker daemon", ["docker", "info"]),
+            ("Sandbox image", ["docker", "image", "inspect", "echo-ai-sandbox:local"]),
+        ):
+            try:
+                result = await asyncio.to_thread(
+                    subprocess.run, command, capture_output=True, text=True
+                )
+                checks.append((label, result.returncode == 0))
+            except OSError:
+                checks.append((label, False))
     try:
         async with httpx.AsyncClient(timeout=5) as client:
             response = await client.get(
@@ -151,61 +157,111 @@ async def doctor(config):
     return 0 if all(good for _, good in checks) else 1
 
 
+def session_lock(sandbox, root):
+    if sandbox.mode == "sandbox":
+        return workspace_lock(sandbox.workspace)
+    locks = root / "locks"
+    locks.mkdir(exist_ok=True)
+    name = hashlib.sha256(os.fsencode(sandbox.workspace)).hexdigest()
+    return workspace_lock(sandbox.workspace, locks / (name + ".lock"))
+
+
 async def execute(args):
+    from .local import LocalWorkspace
     from .sandbox import Sandbox
 
     config = Config.from_env()
     if args.command == "config":
+        path = Path(os.getenv("ECHO_CONFIG_FILE", "echo.yaml")).expanduser().resolve()
+        console.print(f"Config file: {path}", markup=False)
+        console.print("Edit this YAML file for new sessions. Environment and .env override YAML.")
+        console.print("Resumed sessions retain saved settings.")
         console.print_json(data={**asdict(config), "context_char_limit": config.context_char_limit})
         return 0
+    if args.command in ("status", "doctor"):
+        return await doctor(config, sandbox=args.sandbox)
     root = state_dir()
-    if args.command == "doctor":
-        return await doctor(config)
-    if args.command == "bench":
-        from .benchmark import benchmark
-
-        return await benchmark(config, root, args)
     store = Store(root / "sessions.sqlite3")
     sandbox = None
     locks = ExitStack()
-    child = False
     try:
         if args.command == "sessions":
-            for session in store.sessions():
-                console.print(
-                    f"{session['id']}  {session['created']}  "
-                    f"{'child' if session['parent_id'] else 'main'}  {session['workspace']}",
-                    markup=False,
-                )
+            console.print(
+                sessions_panel(
+                    store,
+                    None if args.all else Path(args.repo).resolve(),
+                    include_children=args.all,
+                ),
+            )
             return 0
-        if args.command in ("resume", "diff"):
-            session = store.session(args.session)
-            config = Config.from_session(json.loads(session["config"]))
-            sandbox = await asyncio.to_thread(Sandbox.resume, Path(session["workspace"]), config)
-            key = args.session
-            child = session["parent_id"] is not None
-        else:
-            sandbox = await asyncio.to_thread(Sandbox.create, Path(args.repo).resolve(), root, config)
-            key = store.create(sandbox.workspace, asdict(config))
-        locks.enter_context(workspace_lock(sandbox.workspace))
-        if args.command == "diff":
-            patch = await asyncio.to_thread(sandbox.diff)
-            if getattr(args, "output", None):
-                args.output.write_text(patch)
-                console.print(f"Patch saved: {args.output}", markup=False)
+        pointer = getattr(args, "session", None) or getattr(args, "resume", None)
+        if pointer and getattr(args, "sandbox", False):
+            raise ValueError("Resumed sessions keep their saved mode; omit --sandbox.")
+        repo = Path(getattr(args, "repo", ".")).resolve()
+        fallback = None
+        while True:
+            if pointer:
+                try:
+                    session = store.resolve(pointer, repo)
+                    config = Config.from_session(json.loads(session["config"]))
+                    if session["mode"] == "local":
+                        sandbox = LocalWorkspace.resume(
+                            Path(session["workspace"]), session["state_path"], config
+                        )
+                    else:
+                        sandbox = Sandbox.resume(Path(session["workspace"]), config)
+                    key = session["id"]
+                    child = session["parent_id"] is not None
+                    locks.enter_context(session_lock(sandbox, root))
+                except (RuntimeError, ValueError, OSError) as error:
+                    if fallback is None:
+                        raise
+                    console.print(f"Cannot switch sessions: {error}", markup=False)
+                    if sandbox is not None:
+                        await sandbox.close()
+                        sandbox = None
+                    locks.close()
+                    pointer, fallback = fallback, None
+                    continue
             else:
-                print(safe_text(patch))
-            return 0
-        agent = Agent(Model(config), store, sandbox, key, render, child=child)
-        renderer.configure(agent, plain=plain_requested(args))
-        console.print(f"Session: {key}", style="bold", markup=False)
-        console.print(f"Workspace: {sandbox.workspace}", style="dim", markup=False)
-        if args.command == "run":
-            result = await run_turn(agent, args.task)
-            console.print(f"Inspect changes: echo-ai diff {key}", style="dim")
-            return 0 if result["status"] == "completed" else 1
-        await chat(agent, root)
-        return 0
+                backend = Sandbox if args.sandbox else LocalWorkspace
+                # Lock the checkout before taking the initial local snapshot.
+                if backend is LocalWorkspace:
+                    locks.enter_context(session_lock(LocalWorkspace(repo, root, config), root))
+                sandbox = await asyncio.to_thread(backend.create, repo, root, config)
+                if backend is Sandbox:
+                    locks.enter_context(session_lock(sandbox, root))
+                key = store.create(
+                    sandbox.workspace,
+                    asdict(config),
+                    repo=repo,
+                    mode=sandbox.mode,
+                    state_path=getattr(sandbox, "state_path", None),
+                )
+                child = False
+            if args.command == "diff":
+                patch = await asyncio.to_thread(sandbox.diff)
+                if args.output:
+                    args.output.write_text(patch)
+                    console.print(f"Patch saved: {args.output}", markup=False)
+                else:
+                    print(safe_text(patch))
+                return 0
+            agent = Agent(Model(config), store, sandbox, key, render, child=child)
+            renderer.configure(agent, plain=console.is_dumb_terminal or not console.is_terminal)
+            console.print(f"Session: {key} · {sandbox.mode}", style="bold", markup=False)
+            console.print(f"Workspace: {sandbox.workspace}", style="dim", markup=False)
+            if args.command == "run":
+                result = await run_turn(agent, args.task)
+                console.print(f"Inspect changes: echo-ai diff {key}", style="dim")
+                return 0 if result["status"] == "completed" else 1
+            fallback = key
+            pointer = await chat(agent, root)
+            await sandbox.close()
+            sandbox = None
+            locks.close()
+            if not pointer:
+                return 0
     finally:
         try:
             if sandbox is not None:
@@ -215,30 +271,71 @@ async def execute(args):
             store.close()
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Local coding agent with isolated Docker tools.")
+class CommandParser(argparse.ArgumentParser):
+    def parse_args(self, args=None, namespace=None):
+        args = list(sys.argv[1:] if args is None else args)
+        if not args or (args[0].startswith("-") and args[0] not in {"-h", "--help"}):
+            args.insert(0, "chat")
+        return super().parse_args(args, namespace)
+
+    def format_help(self):
+        text = super().format_help()
+        for action in self._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                text += "\nCommand options:\n"
+                seen = set()
+                for name, parser in action.choices.items():
+                    if id(parser) in seen:
+                        continue
+                    seen.add(id(parser))
+                    text += f"  {name}\n"
+                    for option in parser._actions:
+                        if option.dest == "help":
+                            continue
+                        label = parser._get_formatter()._format_action_invocation(option)
+                        text += f"    {label:24} {option.help or ''}\n"
+        return text
+
+
+def build_parser():
+    parser = CommandParser(description="Local coding agent. Edits your checkout by default.")
     sub = parser.add_subparsers(dest="command", required=True)
-    for command in ("chat", "run"):
-        p = sub.add_parser(command)
-        p.add_argument("--repo", default=".")
-        p.add_argument("--plain", action="store_true", help="Disable live terminal rendering")
+    for command, help_ in (
+        ("chat", "Start an interactive conversation"),
+        ("run", "Execute one task and exit (for scripts)"),
+    ):
+        p = sub.add_parser(command, help=help_)
+        p.add_argument("--repo", default=".", help="Repository path (default: current directory)")
+        p.add_argument("--sandbox", action="store_true", help="Use an isolated Docker workspace")
         if command == "run":
-            p.add_argument("task")
-    for command in ("resume", "diff"):
-        p = sub.add_parser(command)
-        p.add_argument("session")
-        if command == "resume":
-            p.add_argument("--plain", action="store_true", help="Disable live terminal rendering")
-        if command == "diff":
+            p.add_argument("task", help="Task to execute")
+        else:
             p.add_argument(
-                "--output", type=Path, help="Save an unmodified patch for review/application"
+                "--resume",
+                nargs="?",
+                const="latest",
+                metavar="ID",
+                help="Resume ID, or latest session for this repository",
             )
-    sub.add_parser("sessions")
-    sub.add_parser("doctor")
-    sub.add_parser("config", help="Show effective settings for new sessions")
-    p = sub.add_parser("bench")
-    p.add_argument("--attempts", type=int, default=1)
-    p.add_argument("--output", type=Path, default=Path("benchmark-results.json"))
+    p = sub.add_parser("resume", help="Resume a saved session (also: chat --resume)")
+    p.add_argument("session", help="Session ID, unique prefix, or latest")
+    p.add_argument("--repo", default=".", help="Repository used to resolve latest")
+    p = sub.add_parser("diff", help="Show changes since a session started")
+    p.add_argument("session", help="Session ID or unique prefix")
+    p.add_argument("--output", type=Path, help="Save an unmodified patch")
+    p = sub.add_parser("sessions", help="List recent sessions for this repository")
+    p.add_argument("--repo", default=".", help="Repository to list")
+    p.add_argument(
+        "--all", action="store_true", help="Include all repositories and review sessions"
+    )
+    p = sub.add_parser("status", aliases=["doctor"], help="Check the model connection and limits")
+    p.add_argument("--sandbox", action="store_true", help="Also check Docker and the sandbox image")
+    sub.add_parser("config", help="Show YAML path, precedence, and effective settings")
+    return parser
+
+
+def main():
+    parser = build_parser()
     try:
         code = asyncio.run(execute(parser.parse_args()))
     except (RuntimeError, ValueError, OSError, httpx.HTTPError) as error:

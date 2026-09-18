@@ -1,6 +1,5 @@
 """Terminal presentation; agent events stay independent of display refreshes."""
 
-import os
 import time
 from dataclasses import dataclass, field
 
@@ -77,6 +76,8 @@ class Renderer:
         self.event_handler = None
 
     def configure(self, agent, *, plain=False):
+        self.main = Activity()
+        self.child = None
         self.session = agent.session_id
         config = getattr(getattr(agent, "model", None), "config", None)
         if config:
@@ -333,7 +334,3 @@ class Renderer:
                 return f" {candidate} "
         text.truncate(width, overflow="ellipsis")
         return f" {text.plain} "
-
-
-def plain_requested(args):
-    return getattr(args, "plain", False) or os.getenv("TERM") == "dumb"

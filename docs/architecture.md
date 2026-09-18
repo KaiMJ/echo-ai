@@ -5,7 +5,7 @@ prompt_toolkit / batch command
               |
          agent loop ---- vLLM HTTP stream
           |     |
-       SQLite   tool dispatcher ---- disposable Docker container
+       SQLite   tool dispatcher ---- host tools / optional Docker container
           |
       parent / child sessions
 ```
@@ -23,7 +23,8 @@ sandbox, and output callback.
 | `tools.py` | JSON schemas for model requests and argument validation |
 | `sandbox.py` | Repository copy, Docker lifecycle, tools, baseline diff |
 | `store.py` | SQLite sessions, messages, runs, interruption reconciliation |
-| `benchmark.py` | Fixed tasks, independent acceptance checks, JSON results |
+| `local.py` | Host tools, process cleanup, separate snapshot for diffs |
+| `commands.py` | Shared chat help, status, and session formatting |
 
 ## Execution
 
@@ -63,9 +64,22 @@ model settings and child capabilities.
 If a process stops after recording a tool call but before recording its result,
 resume records an **unknown outcome** observation. It never replays that tool
 automatically. The model must inspect current files before retrying. Ctrl-C
-cancels inference or tool execution and removes the active tool container.
+cancels inference or tool execution. Cleanup kills the local tool process group
+or removes the active Docker container.
 
-The original repository is not modified. A Git baseline outside the container's
-writable mount supports diffs including added files. Exported patches are applied
-manually. Changes made to the original checkout after session creation are not
-automatically synchronized.
+Local mode edits the original checkout and runs shell tools on the host. A separate
+session-owned Git baseline records the initial nonignored repository contents.
+Diff refreshes a snapshot against that baseline without touching the checkout's
+index or branch. It includes user edits made after session creation as well.
+
+Sandbox mode copies the repository and leaves the original unchanged. Its Git
+baseline stays outside the container mount. Exported patches are applied manually;
+changes in the original checkout are not synchronized into the copy.
+
+Sessions persist their mode, source repository, title, and last activity. Existing
+sessions migrate as sandbox sessions; their source repository remains unknown.
+`chat --resume` selects the last active parent session in the current repository.
+Explicit IDs and unambiguous prefixes can select any session. `/sessions ID` ends
+the current idle chat, closes tools and releases its lock, then opens the selected
+session with saved settings and restores user/assistant messages. Full traces stay
+in SQLite. Switching is unavailable while a turn is running.

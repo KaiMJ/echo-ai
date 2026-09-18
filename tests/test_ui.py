@@ -10,7 +10,7 @@ async def test_multiline_and_next_prompt(tmp_path):
     with create_pipe_input() as pipe:
         prompt = make_prompt(tmp_path, input=pipe, output=DummyOutput())
         task = asyncio.create_task(prompt.prompt_async("echo › "))
-        pipe.send_text("first\x1b\rsecond\r")
+        pipe.send_text("first\nsecond\r")
         assert await asyncio.wait_for(task, 2) == "first\nsecond"
         task = asyncio.create_task(prompt.prompt_async("echo › "))
         pipe.send_text("/exit\r")
@@ -59,6 +59,8 @@ async def test_resume_preserves_child_permissions_and_lock_during_close(tmp_path
     seen = []
 
     class FakeSandbox:
+        mode = "sandbox"
+
         @classmethod
         def resume(cls, path, config):
             assert config == Config()
@@ -89,7 +91,7 @@ async def test_resume_preserves_child_permissions_and_lock_during_close(tmp_path
 
 
 def test_terminal_stream_cancel_and_next_prompt(tmp_path):
-    """Exercise rendering and Ctrl-C in a real PTY without needing a model server."""
+    """Exercise rendering and Ctrl-D in a real PTY without needing a model server."""
     import sys
 
     import pexpect
@@ -117,17 +119,18 @@ asyncio.run(chat(Agent(), Path(sys.argv[1])))
     )
     try:
         process.expect("echo ›")
-        process.sendline("hello")
+        process.send("hello\r")
         process.expect("response")
         process.expect("/help")
-        process.sendline("wait")
+        process.send("wait\r")
         process.expect("response")
-        process.sendcontrol("c")
+        process.sendcontrol("d")
         process.expect("Cancelled")
-        process.sendline("/status")
+        process.send("/status\r")
         process.sendcontrol("l")  # Repaint for a complete line, rather than cursor diffs.
-        process.expect("Session: test-session")
-        process.sendline("/exit")
+        process.expect("Session status")
+        process.expect("test-session")
+        process.send("/exit\r")
         process.expect(pexpect.EOF)
         process.close()
         assert process.exitstatus == 0
@@ -433,15 +436,15 @@ asyncio.run(chat(agent, Path(sys.argv[1])))
     )
     try:
         process.expect("echo ›")
-        process.sendline("review")
+        process.send("review\r")
         process.expect("Read-only subagent")
         process.expect("Inspect cleanup")
         process.expect("sandbox.py")
         process.setwinsize(22, 70)
         process.expect("Input")
-        process.sendcontrol("c")
+        process.sendcontrol("d")
         process.expect("Cancelled")
-        process.sendline("/exit")
+        process.send("/exit\r")
         process.expect(pexpect.EOF)
         process.close()
         assert process.exitstatus == 0

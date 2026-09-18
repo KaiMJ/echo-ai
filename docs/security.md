@@ -1,4 +1,17 @@
-# Sandbox boundaries
+# Execution modes
+
+Echo edits the checkout directly by default. Local shell commands run with the
+host user's permissions and network access; local mode provides no OS isolation.
+File tools constrain resolved paths to the checkout. Local tools retain timeouts
+and output caps; cancellation kills the tool's process group, including ordinary
+background children. Processes that deliberately detach into another session are
+outside that cleanup guarantee. Docker CPU/memory/process limits do not apply.
+Local diff baselines exclude ignored files, symlinks, and common credential paths;
+they are not complete backups and do not support undo.
+
+## Optional sandbox boundaries
+
+The following applies when starting a session with `--sandbox`.
 
 Echo is intended for trusted single-user development with fallible generated
 commands. Docker reduces accidental damage; it is not a guarantee against
@@ -36,6 +49,4 @@ nonignored before opening a repository. Echo excludes symlinks and common
 credential directories, but cannot identify every sensitive file.
 
 There is no automatic patch application or network access from tools. Review
-patches and run your project's checks before applying changes. Independent
-benchmark tests help detect mistakes but do not prove arbitrary generated code
-safe.
+patches and run your project's checks before applying changes. Tests help detect mistakes but do not prove arbitrary generated code safe.

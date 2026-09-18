@@ -52,7 +52,16 @@ class Agent:
                 self.session_id,
                 {
                     "role": "system",
-                    "content": SYSTEM
+                    "content": (
+                        SYSTEM
+                        if getattr(self.sandbox, "mode", "sandbox") == "sandbox"
+                        else SYSTEM.replace(
+                            "a disposable Docker workspace", "the user's local checkout"
+                        ).replace(
+                            "No network or host access is available. Do not install dependencies during execution.",
+                            "Tools run on the host and edits affect the checkout directly.",
+                        )
+                    )
                     + (
                         "\nYou are a review subagent. Only inspect and report; do not request mutations."
                         if self.child

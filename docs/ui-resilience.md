@@ -42,8 +42,8 @@ from every inference request and excluded from the prompt context guard. With
 input estimate, and the prompt context guard. Generation counts include thinking
 in either mode. Parent
 and reviewer sessions save their own traces. Partial interrupted generations are
-not persisted. Batch commands retain the Rich renderer; `--plain` and redirected
-output remain append-only. No UI performance guarantees have been measured.
+not persisted. Batch commands retain the Rich renderer; redirected output and dumb terminals
+automatically use append-only output. No UI performance guarantees have been measured.
 
 ## Initial checks
 
