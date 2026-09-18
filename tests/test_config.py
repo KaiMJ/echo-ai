@@ -5,7 +5,7 @@ import httpx
 import pytest
 
 from echo_ai.config import Config
-from echo_ai.model import Model
+from echo_ai.runtime.model import Model
 
 
 @pytest.fixture
@@ -121,7 +121,7 @@ def test_invalid_sections(clean_config, content):
 def test_all_config_fields_have_yaml_sections():
     from dataclasses import fields
 
-    from echo_ai.config_file import YAML_SECTIONS
+    from echo_ai.config.file import YAML_SECTIONS
 
     def leaves(schema):
         return [
@@ -147,7 +147,7 @@ def test_theme_loads_separately_from_saved_runtime(clean_config):
     from dataclasses import asdict
 
     from echo_ai.config import load_theme
-    from echo_ai.theme import Theme
+    from echo_ai.config.theme import Theme
 
     assert load_theme() == Theme()
     path = clean_config / "echo.yaml"

@@ -15,7 +15,7 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from .config import Config
+from echo_ai.config import Config
 
 IMAGE = "echo-ai-sandbox:local"
 

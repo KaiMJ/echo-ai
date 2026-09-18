@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 
 from echo_ai.cli import session_lock
-from echo_ai.local import LocalWorkspace
+from echo_ai.workspace.local import LocalWorkspace
 
 
 def git(repo, *args):

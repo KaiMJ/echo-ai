@@ -3,7 +3,7 @@ import sqlite3
 
 import pytest
 
-from echo_ai.store import Store
+from echo_ai.runtime.store import Store
 
 
 def test_migrate_old_sessions_without_changing_mode(tmp_path):

@@ -1,7 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
-from echo_ai.sandbox import Sandbox
+from echo_ai.workspace.sandbox import Sandbox
 
 
 async def test_shell_output_streams_before_exit_and_decodes_split_utf8(tmp_path, monkeypatch):

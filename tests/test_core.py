@@ -5,10 +5,10 @@ from dataclasses import asdict
 import httpx
 import pytest
 
-from echo_ai.agent import Agent
 from echo_ai.config import Config
-from echo_ai.model import Model
-from echo_ai.store import Store
+from echo_ai.runtime.agent import Agent
+from echo_ai.runtime.model import Model
+from echo_ai.runtime.store import Store
 
 
 def sse(*chunks):
@@ -73,7 +73,7 @@ async def test_reasoning_is_saved_but_never_sent(tmp_path):
 
     from rich.console import Console
 
-    from echo_ai.ui import Renderer
+    from echo_ai.ui.renderer import Renderer
 
     renderer = Renderer(Console(file=StringIO()))
     requests, events, input_counts = [], [], []
@@ -361,7 +361,7 @@ async def test_reasoning_policy_covers_history_tool_loop_and_input_counter(
 
     from rich.console import Console
 
-    from echo_ai.ui import Renderer
+    from echo_ai.ui.renderer import Renderer
 
     store = Store(tmp_path / "state.db")
     key = store.create(tmp_path, {})

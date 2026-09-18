@@ -8,8 +8,8 @@ from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.output import DummyOutput
 from rich.console import Console
 
-from echo_ai.terminal import TerminalChat
-from echo_ai.ui import Renderer
+from echo_ai.ui.renderer import Renderer
+from echo_ai.ui.terminal import TerminalChat
 
 
 @pytest.fixture
@@ -161,10 +161,10 @@ def test_copy_mode_keeps_open_tool_stable_during_completion(chat):
 
 
 def test_spinner_animates_and_stops_on_completion(chat, monkeypatch):
-    monkeypatch.setattr("echo_ai.terminal.time.monotonic", lambda: 1.0)
+    monkeypatch.setattr("echo_ai.ui.terminal.time.monotonic", lambda: 1.0)
     chat.renderer.emit("tool_start", "list")
     before = lines(chat.transcript)[0]
-    monkeypatch.setattr("echo_ai.terminal.time.monotonic", lambda: 1.2)
+    monkeypatch.setattr("echo_ai.ui.terminal.time.monotonic", lambda: 1.2)
     assert lines(chat.transcript)[0] != before
     chat.renderer.emit("tool_end", {"output": "file.md"})
     assert lines(chat.transcript)[0].startswith("✓ ")
@@ -200,7 +200,7 @@ def test_drag_highlights_and_copies_without_opening_details(chat):
 
 @pytest.mark.parametrize("command", ["/keys", "/details", "/copy", "/status details"])
 async def test_removed_commands(chat, command):
-    from echo_ai.commands import COMMANDS
+    from echo_ai.ui.commands import COMMANDS
 
     assert command not in COMMANDS
     await chat.submit(command)
@@ -323,7 +323,7 @@ async def test_help_and_formatted_status(chat):
 
 
 async def test_session_list_switch_and_restored_conversation(chat, tmp_path, monkeypatch):
-    from echo_ai.store import Store
+    from echo_ai.runtime.store import Store
 
     store = Store(tmp_path / "state.db")
     current = store.create(tmp_path, {}, repo=tmp_path)
@@ -356,7 +356,7 @@ def test_command_completion_only_at_prompt_start():
     from prompt_toolkit.completion import CompleteEvent
     from prompt_toolkit.document import Document
 
-    from echo_ai.commands import COMMANDS, CommandCompleter
+    from echo_ai.ui.commands import COMMANDS, CommandCompleter
 
     def suggestions(text):
         return [c.text for c in CommandCompleter().get_completions(Document(text), CompleteEvent())]
@@ -547,7 +547,7 @@ def test_wrapped_user_block_copy_keeps_original_text(chat):
 
 
 async def test_sessions_are_formatted_with_current_marker(chat, tmp_path):
-    from echo_ai.store import Store
+    from echo_ai.runtime.store import Store
 
     store = Store(tmp_path / "sessions.db")
     try:
@@ -567,7 +567,7 @@ async def test_sessions_are_formatted_with_current_marker(chat, tmp_path):
 
 
 async def test_new_command_exits_to_fresh_session(chat, monkeypatch):
-    from echo_ai.commands import NEW_SESSION
+    from echo_ai.ui.commands import NEW_SESSION
 
     results = []
     monkeypatch.setattr(chat.app, "exit", lambda **kwargs: results.append(kwargs["result"]))

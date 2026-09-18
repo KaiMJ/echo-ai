@@ -8,8 +8,8 @@ from dataclasses import asdict
 import httpx
 from jsonschema import ValidationError, validate
 
-from .model import request_messages
-from .tools import DELEGATE, tools_for
+from echo_ai.runtime.model import request_messages
+from echo_ai.runtime.tools import DELEGATE, tools_for
 
 SYSTEM = """You are Echo, a coding agent working in a disposable Docker workspace.
 Inspect relevant files before editing. Make the smallest correct change. Run relevant tests.

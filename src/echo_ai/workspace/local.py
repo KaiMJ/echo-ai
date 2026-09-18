@@ -8,7 +8,7 @@ import signal
 import sys
 from pathlib import Path
 
-from .sandbox import Sandbox, _copy_repository
+from echo_ai.workspace.sandbox import Sandbox, _copy_repository
 
 
 class LocalWorkspace(Sandbox):

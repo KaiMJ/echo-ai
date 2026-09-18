@@ -6,7 +6,7 @@ import subprocess
 
 import pytest
 
-from echo_ai.sandbox import IMAGE, Sandbox
+from echo_ai.workspace.sandbox import IMAGE, Sandbox
 
 
 @pytest.fixture

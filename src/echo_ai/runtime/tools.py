@@ -2,7 +2,7 @@
 
 from copy import deepcopy
 
-from .config import Config
+from echo_ai.config import Config
 
 
 def function(name, description, properties, required):

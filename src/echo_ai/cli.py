@@ -18,12 +18,18 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Console
 
-from .agent import Agent
-from .commands import NEW_SESSION, CommandCompleter, help_text, sessions_panel, status_panel
-from .config import Config, load_theme, state_dir
-from .model import Model
-from .store import Store, workspace_lock
-from .ui import Renderer, safe_text
+from echo_ai.config import Config, load_theme, state_dir
+from echo_ai.runtime.agent import Agent
+from echo_ai.runtime.model import Model
+from echo_ai.runtime.store import Store, workspace_lock
+from echo_ai.ui.commands import (
+    NEW_SESSION,
+    CommandCompleter,
+    help_text,
+    sessions_panel,
+    status_panel,
+)
+from echo_ai.ui.renderer import Renderer, safe_text
 
 console = Console(highlight=False)
 
@@ -72,7 +78,7 @@ async def run_turn(agent, prompt):
 
 async def chat(agent, root):
     if console.is_terminal and not renderer.plain and not console.is_dumb_terminal:
-        from .terminal import TerminalChat
+        from echo_ai.ui.terminal import TerminalChat
 
         return await TerminalChat(agent, root, renderer).run()
     prompt_options = {}
@@ -173,8 +179,8 @@ def session_lock(sandbox, root):
 
 
 async def execute(args):
-    from .local import LocalWorkspace
-    from .sandbox import Sandbox
+    from echo_ai.workspace.local import LocalWorkspace
+    from echo_ai.workspace.sandbox import Sandbox
 
     config = Config.from_env()
     if args.command == "config":

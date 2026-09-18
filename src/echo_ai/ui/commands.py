@@ -5,7 +5,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from .theme import Theme
+from echo_ai.config.theme import Theme
 
 NEW_SESSION = object()
 

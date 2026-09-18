@@ -47,9 +47,10 @@ async def test_resume_preserves_child_permissions_and_lock_during_close(tmp_path
 
     import pytest
 
-    from echo_ai import cli, sandbox
+    from echo_ai import cli
     from echo_ai.config import Config
-    from echo_ai.store import Store
+    from echo_ai.runtime.store import Store
+    from echo_ai.workspace import sandbox
 
     store = Store(tmp_path / "sessions.sqlite3")
     workspace = tmp_path / "workspace"
@@ -143,7 +144,7 @@ def test_renderer_plain_stream_and_child_visibility():
 
     from rich.console import Console
 
-    from echo_ai.ui import Renderer
+    from echo_ai.ui.renderer import Renderer
 
     output = StringIO()
     ui = Renderer(Console(file=output, width=100))
@@ -180,7 +181,7 @@ def test_context_uses_latest_prompt_not_cumulative_usage():
 
     from rich.console import Console
 
-    from echo_ai.ui import Renderer
+    from echo_ai.ui.renderer import Renderer
 
     ui = Renderer(Console(file=StringIO()))
     request = {"context_chars": 600, "context_tokens": 1000, "remaining": 8, "max_steps": 10}
@@ -210,7 +211,7 @@ def test_generated_tokens_include_thinking_and_tool_deltas_then_use_server_usage
 
     from rich.console import Console
 
-    from echo_ai.ui import Renderer
+    from echo_ai.ui.renderer import Renderer
 
     ui = Renderer(Console(file=StringIO(), width=160))
     request = {
@@ -257,7 +258,7 @@ def test_dashboard_handles_resize_and_untrusted_text():
 
     from rich.console import Console
 
-    from echo_ai.ui import Renderer
+    from echo_ai.ui.renderer import Renderer
 
     output = StringIO()
     console = Console(file=output, width=120, height=35)
@@ -280,7 +281,7 @@ def test_context_display_follows_review_and_returns_to_parent():
 
     from rich.console import Console
 
-    from echo_ai.ui import Renderer
+    from echo_ai.ui.renderer import Renderer
 
     output = StringIO()
     console = Console(file=output, force_terminal=False)
@@ -317,7 +318,7 @@ def test_stream_preview_keeps_latest_wrapped_lines_visible():
 
     from rich.console import Console
 
-    from echo_ai.ui import Renderer
+    from echo_ai.ui.renderer import Renderer
 
     for width, height in ((120, 35), (70, 22), (40, 12), (24, 8)):
         output = StringIO()
@@ -335,7 +336,7 @@ def test_plain_reasoning_is_separated_from_answer():
 
     from rich.console import Console
 
-    from echo_ai.ui import Renderer
+    from echo_ai.ui.renderer import Renderer
 
     output = StringIO()
     ui = Renderer(Console(file=output, force_terminal=False))
@@ -352,7 +353,7 @@ def test_streaming_footer_stays_at_bottom_with_actual_context_counts():
 
     from rich.console import Console
 
-    from echo_ai.ui import Renderer
+    from echo_ai.ui.renderer import Renderer
 
     for width in (120, 70, 40, 24):
         output = StringIO()
@@ -382,7 +383,7 @@ def test_tool_preview_limits_lines_and_preserves_errors():
 
     from rich.console import Console
 
-    from echo_ai.ui import Renderer
+    from echo_ai.ui.renderer import Renderer
 
     output = StringIO()
     ui = Renderer(Console(file=output, force_terminal=False))

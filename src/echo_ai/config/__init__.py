@@ -4,9 +4,9 @@ import os
 from dataclasses import dataclass, fields
 from pathlib import Path
 
-from .config_file import load_environment, read_document, yaml_values
-from .settings import RuntimeSettings
-from .theme import Theme
+from echo_ai.config.file import load_environment, read_document, yaml_values
+from echo_ai.config.settings import RuntimeSettings
+from echo_ai.config.theme import Theme
 
 
 @dataclass(frozen=True)

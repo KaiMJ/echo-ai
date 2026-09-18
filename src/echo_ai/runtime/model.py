@@ -6,7 +6,7 @@ import time
 
 import httpx
 
-from .config import Config
+from echo_ai.config import Config
 
 
 def request_messages(messages, *, return_reasoning=False):

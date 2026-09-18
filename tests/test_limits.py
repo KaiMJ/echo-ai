@@ -5,10 +5,10 @@ from pathlib import Path
 import pytest
 from jsonschema import ValidationError, validate
 
-from echo_ai import sandbox_tools
 from echo_ai.config import Config
-from echo_ai.sandbox import Sandbox, _workspace_size
-from echo_ai.tools import tools_for
+from echo_ai.runtime.tools import tools_for
+from echo_ai.workspace import sandbox_tools
+from echo_ai.workspace.sandbox import Sandbox, _workspace_size
 
 
 def test_workspace_limit_applies_to_copy_and_existing_workspace(tmp_path):
@@ -58,7 +58,7 @@ async def test_docker_receives_configured_limits(tmp_path, monkeypatch):
         commands.append(args)
         return 0, ""
 
-    monkeypatch.setattr("echo_ai.sandbox.os.getuid", lambda: 1000)
+    monkeypatch.setattr("echo_ai.workspace.sandbox.os.getuid", lambda: 1000)
     monkeypatch.setattr(sandbox, "_docker", docker)
     await sandbox._start()
     command = commands[0]

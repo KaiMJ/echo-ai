@@ -38,7 +38,8 @@ from rich.markdown import Markdown
 from rich.syntax import Syntax
 from rich.text import Text
 
-from .commands import (
+from echo_ai.config import load_theme
+from echo_ai.ui.commands import (
     NEW_SESSION,
     CommandCompleter,
     help_text,
@@ -47,8 +48,7 @@ from .commands import (
     status_panel,
     status_text,
 )
-from .config import load_theme
-from .ui import safe_text
+from echo_ai.ui.renderer import safe_text
 
 # prompt_toolkit has no Ctrl+Shift+letter key token. Reserve F24 internally for
 # the CSI-u / modifyOtherKeys sequences terminals can forward for Ctrl+Shift+C.

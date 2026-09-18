@@ -2,7 +2,7 @@ from dataclasses import asdict
 
 from echo_ai import cli
 from echo_ai.config import Config
-from echo_ai.store import Store
+from echo_ai.runtime.store import Store
 
 
 def test_help_and_resume_arguments():
@@ -17,7 +17,7 @@ def test_help_and_resume_arguments():
 
 
 async def test_switch_restores_saved_mode_config_and_releases_lock(tmp_path, monkeypatch):
-    from echo_ai.store import workspace_lock
+    from echo_ai.runtime.store import workspace_lock
 
     root = tmp_path / "state"
     root.mkdir()
@@ -77,7 +77,7 @@ async def test_run_defaults_to_local_tools_and_persists_mode(tmp_path, monkeypat
 
     import httpx
 
-    from echo_ai.model import Model
+    from echo_ai.runtime.model import Model
 
     repo, root = tmp_path / "repo", tmp_path / "state"
     repo.mkdir()
@@ -158,9 +158,9 @@ def test_plain_option_removed():
 async def test_new_session_keeps_repo_mode_and_previous_history(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
-    from echo_ai.commands import NEW_SESSION
-    from echo_ai.sandbox import Sandbox
-    from echo_ai.store import workspace_lock
+    from echo_ai.runtime.store import workspace_lock
+    from echo_ai.ui.commands import NEW_SESSION
+    from echo_ai.workspace.sandbox import Sandbox
 
     root, repo, workspace = tmp_path / "state", tmp_path / "repo", tmp_path / "old/workspace"
     root.mkdir()
@@ -215,7 +215,7 @@ async def test_new_session_keeps_repo_mode_and_previous_history(tmp_path, monkey
 async def test_plain_new_command(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
-    from echo_ai.commands import NEW_SESSION
+    from echo_ai.ui.commands import NEW_SESSION
 
     async def prompt(_):
         return "/new"
