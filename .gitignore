@@ -1,2 +1,12 @@
 /scripts/
 __pycache__/
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.echo/
+dist/
+
+.env
+.env.*
+!.env.example

@@ -1,0 +1,51 @@
+name: echo
+
+services:
+  inference:
+    image: vllm/vllm-openai@sha256:c2914767605584b6d8f45686b82de173ecc99e781897aa3d0a66dacd72c51ae1
+    container_name: echo-vllm
+    gpus: all
+    shm_size: 4gb
+    ports:
+      - "127.0.0.1:${ECHO_INFERENCE_PORT:-8001}:8000"
+    volumes:
+      - "${ECHO_MODEL_CACHE:?Set ECHO_MODEL_CACHE to the model cache directory}:/model:ro"
+      - inference-cache:/root/.cache/vllm
+    environment:
+      HF_HUB_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    command:
+      - /model/snapshots/${ECHO_MODEL_REVISION:-3a7dcb639a4e7b230a0491ab4fa6fac081284d37}
+      - --served-model-name
+      - gemma
+      - ${ECHO_MODEL:-cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit}
+      - --pipeline-parallel-size
+      - "${ECHO_PIPELINE_PARALLEL_SIZE:-2}"
+      - --tensor-parallel-size
+      - "${ECHO_TENSOR_PARALLEL_SIZE:-1}"
+      - --max-model-len
+      - "${ECHO_CONTEXT_TOKENS:-262144}"
+      - --gpu-memory-utilization
+      - "${ECHO_GPU_MEMORY_UTILIZATION:-0.90}"
+      - --max-num-seqs
+      - "${ECHO_MAX_NUM_SEQS:-4}"
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - gemma4
+      - --reasoning-parser
+      - gemma4
+      - --language-model-only
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+
+volumes:
+  inference-cache:

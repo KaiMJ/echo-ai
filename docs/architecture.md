@@ -1,28 +1,71 @@
-# Architecture: CLI coding agent
-
-## Initial topology
-
-The prompt_toolkit REPL, async single-agent loop, SQLite persistence, and Rich renderer run in one CLI process. A separate vLLM process serves the configured Qwen model over HTTP. Coding tools run within a Docker sandbox against a disposable checkout.
+# Architecture
 
 ```text
-CLI input → agent loop ↔ model adapter ↔ vLLM
-                 ├─ session store (SQLite)
-                 ├─ tool dispatcher ↔ sandbox
-                 └─ typed events → renderer
+prompt_toolkit / batch command
+              |
+         agent loop ---- vLLM HTTP stream
+          |     |
+       SQLite   tool dispatcher ---- disposable Docker container
+          |
+      parent / child sessions
 ```
 
-Keep the loop independent of prompt_toolkit and Rich. The UI submits a task and cancellation requests; the loop emits events. A future daemon can reuse these interfaces without requiring IPC in M1.
+The CLI owns one active turn. There is no daemon, message broker, or framework.
+The loop is independent of terminal rendering, so tests can supply a fake model,
+sandbox, and output callback.
 
-## Responsibilities
+| Module | Responsibility |
+| --- | --- |
+| `cli.py` | Commands, prompt, streaming display, cancellation, workspace lock |
+| `config.py` | Shared .env loading, validation, and execution defaults |
+| `model.py` | HTTP streaming, complete tool-call reconstruction, usage |
+| `agent.py` | Sequential model/tool loop and review delegation |
+| `tools.py` | JSON schemas for model requests and argument validation |
+| `sandbox.py` | Repository copy, Docker lifecycle, tools, baseline diff |
+| `store.py` | SQLite sessions, messages, runs, interruption reconciliation |
+| `benchmark.py` | Fixed tasks, independent acceptance checks, JSON results |
 
-- **Model adapter:** stream text, assemble tool-call fragments, expose finish/error conditions, and use configured endpoint/model settings.
-- **Agent loop:** validate complete tool calls, sequence tool execution and follow-up inference, bound iteration, and track turn state.
-- **Tool dispatcher:** enforce workspace scope, capture output, apply timeouts/cancellation, and return structured results. Generated tool processes cannot access the host Docker socket.
-- **Session store:** persist messages, tool IDs/arguments/results, turn state, and configuration provenance. Record tool intent before execution and result afterward so interruption can be reconciled.
-- **Renderer:** consume events and own terminal writes; it does not drive tools or alter session state.
+## Execution
 
-Initial events include turn start, text delta, tool start, tool output, tool end, turn complete, cancellation, and error. Include session/turn IDs and ordering information. UI refresh batching must not lose semantic events or durable content.
+Assistant text streams immediately. Tool calls execute only after a complete
+response with a valid finish reason. Arguments must match the tool schema.
+Errors are returned as tool results, allowing the model to correct its request.
+Truncated or broken model streams never execute partial tool calls. Model
+requests are not retried automatically.
 
-## Later boundaries
+A turn allows 20 model calls by default, shared with children. Review children
+have at most eight calls, cannot delegate, and can only read, search, or list.
+They inspect the same workspace sequentially; there are no concurrent writers.
+Parent and child transcripts are separate, linked SQLite sessions. Delegation
+returns findings and usage; the parent decides what to do with them. Review
+findings are model output, not verified defects.
 
-Session branching and code checkpoints follow the working loop. Generated-tool workers and controlled core restart support self-development. Daemon IPC, Neovim, Web UI, routing, and concurrent agents are deferred. See the [roadmap](../README.md), [CLI contract](cli.md), and [recovery design](sessions-and-dag.md).
+The model adapter reserves `ECHO_MAX_TOKENS` output tokens per model call (16,384 by default).
+`ECHO_CONTEXT_TOKENS` sets total context (262,144 by default) in both the client
+and Compose. The transcript guard estimates three characters per input token,
+after reserving output and 1,500 tokens for template/tool-schema overhead.
+`ECHO_MAX_CONTEXT_CHARS` can impose a stricter cap. This is a heuristic, not a
+tokenizer: code, Unicode, and tool schemas can still exceed the server's limit.
+Start a focused new session when the guard is reached. Automatic summarization
+and exact tokenizer accounting are deferred.
+
+## Persistence and interruption
+
+Messages and run status are committed independently as work progresses. SQLite
+uses WAL mode. API keys are read from the environment, not stored in session
+configuration. Transcripts may contain sensitive repository content.
+Partial streamed text is displayed but saved only when the model response completes.
+
+A filesystem lock prevents two CLI processes from opening the same workspace,
+including a parent and its review child. A resumed session retains its original
+model settings and child capabilities.
+
+If a process stops after recording a tool call but before recording its result,
+resume records an **unknown outcome** observation. It never replays that tool
+automatically. The model must inspect current files before retrying. Ctrl-C
+cancels inference or tool execution and removes the active tool container.
+
+The original repository is not modified. A Git baseline outside the container's
+writable mount supports diffs including added files. Exported patches are applied
+manually. Changes made to the original checkout after session creation are not
+automatically synchronized.
