@@ -256,17 +256,17 @@ asyncio.run(chat(Agent(), Path(sys.argv[1])))
         process.send("first\nsecond\r")
         process.expect("Answer ready")
         # Drag over the answer, then copy without cancelling or closing the view.
-        process.send("\x1b[<0;3;8M\x1b[<32;9;8M\x1b[<0;9;8m")
+        process.send("\x1b[<0;3;11M\x1b[<32;9;11M\x1b[<0;9;11m")
         process.send("\x03")
         process.expect_exact("\x1b]52;c;QW5zd2Vy\x07")  # "Answer", base64 encoded.
         process.send("\x1b")
         # Start on a blank row, beyond its text, and drag back into the answer.
-        process.send("\x1b[<0;23;9M\x1b[<32;3;8M\x1b[<0;3;8m")
+        process.send("\x1b[<0;23;12M\x1b[<32;3;11M\x1b[<0;3;11m")
         process.send("\x03")
         process.expect_exact("\x1b]52;c;QW5zd2VyIHJlYWR5Cg==\x07")
         process.send("\x1b")
-        # User Markdown is one paragraph (first/second), placing reasoning on row 5.
-        process.send("\x1b[<0;5;5M\x1b[<0;5;5m")
+        # User input preserves both lines, plus borders place reasoning on row 8.
+        process.send("\x1b[<0;5;8M\x1b[<0;5;8m")
         process.expect("Trace details")
         process.expect("Trace body only visible in popup")
         process.send("\x1bOR")  # F3 releases terminal mouse reporting for native selection.
@@ -317,7 +317,7 @@ async def test_help_and_formatted_status(chat):
     assert "Session: test" in entry.text and "Input counts" not in entry.text
     assert entry.renderable is not None
     rendered = entry.markdown_lines(80)
-    assert entry.renderable.renderable.columns[0].style == "bold cyan"
+    assert entry.renderable.renderable.columns[0].style == f"bold {chat.theme.accent}"
     assert any("bold" in part[0] for line in rendered for part in line)
     assert "Session status" in "\n".join("".join(p[1] for p in line) for line in rendered)
 
@@ -377,7 +377,7 @@ def test_click_selects_full_block_and_alt_copy_uses_source(chat, kind):
         chat.transcript.mouse_handler(MouseEvent(Point(0, 0), event, MouseButton.LEFT, frozenset()))
     control = chat.details if chat.selected else chat.transcript
     assert control.selected_text() == chat.entry_text(entry)
-    assert any("class:selection" in p[0] for p in control.create_content(80, 30).get_line(0))
+    assert any("class:block-selection" in p[0] for p in control.create_content(80, 30).get_line(0))
     copied = []
     chat.copy_text = copied.append
     chat.copy_output()
@@ -451,6 +451,12 @@ async def test_typing_and_newline_while_streaming_and_slash_menu(tmp_path):
             assert instance.editor.text == "draft\nsecond"
             pipe.send_text("\x03")
             await until(lambda: copied == ["Streaming answer"])
+            assert instance.editor.text == "draft\nsecond" and instance.busy
+            pipe.send_text("\x1b")
+            await until(lambda: instance.editor.text == "")
+            assert instance.busy
+            pipe.send_text("draft\nsecond")
+            await until(lambda: instance.editor.text == "draft\nsecond")
             pipe.send_text("\x1b[99;6u")
             await until(lambda: len(copied) == 2)
             assert copied[-1] == 'user:\n"first"\n\necho:\n"Streaming answer"'
@@ -488,22 +494,56 @@ def test_second_click_clears_block_selection(chat, kind):
             assert control.selected_text() == ""
             assert control.selection_rows is None
             assert not any(
-                "class:selection" in p[0] for p in control.create_content(80, 30).get_line(0)
+                "class:block-selection" in p[0] for p in control.create_content(80, 30).get_line(0)
             )
 
 
-def test_turn_backgrounds_cover_padding_and_group_echo_entries(chat):
+@pytest.mark.parametrize("width", [20, 80, 120])
+def test_user_right_and_model_left_without_backgrounds(chat, width):
     chat.add("user", "You", "Question")
     chat.add("reasoning", "Reasoning", "Thinking", done=True)
     chat.add("tool", "Tool", "Result", done=True)
     chat.add("text", "Echo", "Answer")
-    chat.add("user", "You", "Next question")
-    content = chat.transcript.create_content(80, 30)
+    content = chat.transcript.create_content(width, 30)
     for i, (_, entry) in enumerate(chat.transcript.rows):
+        line = content.get_line(i)
+        text = "".join(p[1] for p in line)
+        assert not any("class:turn-" in p[0] or "bg:" in p[0] for p in line)
         if entry is not None:
-            expected = "class:turn-user" if entry.kind == "user" else "class:turn-echo"
-            assert all(expected in part[0] for part in content.get_line(i))
-            assert sum(len(part[1]) for part in content.get_line(i)) == 80
+            if entry.kind == "user":
+                assert text.lstrip().startswith(("╭", "│", "╰"))
+                assert len(text) == width
+            else:
+                assert not text.startswith(" ")
+
+
+def test_right_aligned_selection_omits_layout_padding_preserves_indentation(chat):
+    entry = chat.add("user", "You", "def example():\n    return '界'")
+    rendered = lines(chat.transcript)
+    assert "def example():" in rendered[2] and "return" in rendered[3]
+    control = chat.transcript
+    control.selection_rows = control.rows
+    control.anchor = (2, 0)
+    control.selection_end = (3, 80)
+    assert control.selected_text() == entry.text
+    control.clear_selection()
+    control.select_entry(entry)
+    assert control.selected_text() == entry.text
+    assert not any(
+        "class:block-selection" in style and "class:alignment-gutter" in style
+        for style, _ in control.create_content(80, 30).get_line(1)
+    )
+
+
+def test_wrapped_user_block_copy_keeps_original_text(chat):
+    text = "A long message with **literal Markdown** and Unicode 界 " * 3
+    entry = chat.add("user", "You", text)
+    assert len(lines(chat.transcript, width=40)) > 4
+    chat.transcript.select_entry(entry)
+    copied = []
+    chat.copy_text = copied.append
+    chat.copy_output()
+    assert copied == [text]
 
 
 async def test_sessions_are_formatted_with_current_marker(chat, tmp_path):
@@ -524,3 +564,74 @@ async def test_sessions_are_formatted_with_current_marker(chat, tmp_path):
         assert "/sessions ID to switch" in rendered
     finally:
         store.close()
+
+
+async def test_new_command_exits_to_fresh_session(chat, monkeypatch):
+    from echo_ai.commands import NEW_SESSION
+
+    results = []
+    monkeypatch.setattr(chat.app, "exit", lambda **kwargs: results.append(kwargs["result"]))
+    chat.add("text", "Echo", "Previous answer")
+    await chat.submit("/new")
+    assert results == [NEW_SESSION]
+    assert chat.entries[-1].text == "Previous answer"
+
+
+def test_block_selection_fills_blank_lines_and_preserves_colors(chat):
+    from prompt_toolkit.styles import Style
+
+    entry = chat.add("text", "Echo", "Alpha\n\nBeta")
+    rendered = lines(chat.transcript)
+    blank = next(i for i, row in enumerate(rendered[1:-1], 1) if not row.strip())
+    chat.transcript.select_entry(entry)
+    line = chat.transcript.create_content(80, 30).get_line(blank)
+    assert "".join(p[1] for p in line) == " " * 80
+    assert all("class:block-selection" in p[0] for p in line)
+    style = Style.from_dict(chat.theme.styles())
+    selected = style.get_attrs_for_style_str("fg:#ff0000 bold class:block-selection")
+    assert selected.color == "ff0000" and selected.bold
+    assert selected.bgcolor == chat.theme.selection_background.lstrip("#")
+
+
+def test_user_bubble_border_is_not_copied(chat):
+    entry = chat.add("user", "You", "Hello\n\n    world")
+    rendered = lines(chat.transcript)
+    assert "╭" in rendered[0] and "╰" in rendered[-2]
+    control = chat.transcript
+    control.selection_rows = control.rows
+    control.anchor = (2, 0)
+    control.selection_end = (len(rendered) - 2, 80)
+    assert control.selected_text() == entry.text
+    control.select_entry(entry)
+    assert control.selected_text() == entry.text
+
+
+def test_escape_dismisses_ui_before_clearing_draft(chat):
+    from prompt_toolkit.completion import Completion
+    from prompt_toolkit.keys import Keys
+
+    escape = chat.app.key_bindings.get_bindings_for_keys((Keys.Escape,))[-1].handler
+    chat.editor.text = "/he"
+    chat.editor.buffer._set_completions([Completion("/help", start_position=-3)])
+    escape(None)
+    assert chat.editor.buffer.complete_state is None
+    assert chat.editor.text == "/he"
+
+    entry = chat.add("text", "Echo", "Answer")
+    chat.editor.text = "keep draft"
+    chat.transcript.select_entry(entry)
+    escape(None)
+    assert chat.transcript.selection_rows is None and chat.editor.text == "keep draft"
+
+    chat.open_details(entry)
+    chat.details.select_entry(entry)
+    escape(None)
+    assert chat.selected is entry and chat.editor.text == "keep draft"
+    escape(None)
+    assert chat.selected is None and chat.editor.text == "keep draft"
+
+    chat.toggle_copy()
+    escape(None)
+    assert not chat.copy_mode and chat.editor.text == "keep draft"
+    escape(None)
+    assert chat.editor.text == ""

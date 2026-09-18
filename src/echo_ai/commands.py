@@ -5,6 +5,10 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from .theme import Theme
+
+NEW_SESSION = object()
+
 
 class CommandCompleter(Completer):
     """Offer commands only when the entire prompt starts with a slash."""
@@ -20,6 +24,7 @@ class CommandCompleter(Completer):
 
 COMMANDS = {
     "/help": "List commands",
+    "/new": "Start a fresh session in this repository",
     "/status": "Show session, execution mode, and token usage",
     "/sessions": "List sessions for this repository",
     "/sessions ID": "Switch to a session (short IDs or latest accepted)",
@@ -44,19 +49,20 @@ def sessions_text(store, repo=None, *, include_children=False):
     )
 
 
-def sessions_panel(store, repo=None, *, current=None, include_children=False):
+def sessions_panel(store, repo=None, *, current=None, include_children=False, theme=None):
+    theme = theme or Theme()
     rows = store.sessions(repo, include_children=include_children)
-    table = Table(show_header=False, show_lines=True, expand=True, border_style="bright_black")
+    table = Table(show_header=False, show_lines=True, expand=True, border_style=theme.muted)
     table.add_column(ratio=1, overflow="fold")
     for session in rows:
         text = Text(session["title"] or "New session", style="bold")
         if session["id"] == current:
-            text.append("  • current", style="bold green")
-        text.append("\n" + session["id"], style="cyan")
+            text.append("  • current", style=f"bold {theme.success}")
+        text.append("\n" + session["id"], style=theme.accent)
         text.append(
             f"  ·  {session['mode']}  ·  {session['turns']} turns"
             + ("  ·  review" if session["parent_id"] else ""),
-            style="yellow",
+            style=theme.warning,
         )
         text.append(f"\nUpdated {session['updated']} UTC", style="dim")
         text.append("\n" + str(session["repo"] or session["workspace"]), style="dim")
@@ -65,7 +71,7 @@ def sessions_panel(store, repo=None, *, current=None, include_children=False):
         table if rows else Text("No sessions found.", style="dim"),
         title="Sessions",
         subtitle="/sessions ID to switch",
-        border_style="cyan",
+        border_style=theme.accent,
     )
 
 
@@ -83,10 +89,11 @@ def status_text(agent, renderer):
     return "\n".join(f"{label}: {value}" for label, value in status_rows(agent, renderer))
 
 
-def status_panel(agent, renderer):
+def status_panel(agent, renderer, *, theme=None):
+    theme = theme or Theme()
     table = Table.grid(padding=(0, 2), expand=True)
-    table.add_column(style="bold cyan", no_wrap=True)
+    table.add_column(style=f"bold {theme.accent}", no_wrap=True)
     table.add_column(ratio=1, overflow="fold")
     for label, value in status_rows(agent, renderer):
         table.add_row(label, Text(value))
-    return Panel(table, title="Session status", border_style="bright_black", padding=(1, 2))
+    return Panel(table, title="Session status", border_style=theme.muted, padding=(1, 2))

@@ -19,8 +19,8 @@ from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Console
 
 from .agent import Agent
-from .commands import CommandCompleter, help_text, sessions_panel, status_panel
-from .config import Config, state_dir
+from .commands import NEW_SESSION, CommandCompleter, help_text, sessions_panel, status_panel
+from .config import Config, load_theme, state_dir
 from .model import Model
 from .store import Store, workspace_lock
 from .ui import Renderer, safe_text
@@ -92,11 +92,17 @@ async def chat(agent, root):
             continue
         if text == "/exit":
             break
+        if text == "/new":
+            return NEW_SESSION
         if text == "/help":
             console.print(help_text(), markup=False)
         elif text == "/sessions":
             session = agent.store.session(agent.session_id)
-            console.print(sessions_panel(agent.store, session["repo"], current=agent.session_id))
+            console.print(
+                sessions_panel(
+                    agent.store, session["repo"], current=agent.session_id, theme=load_theme()
+                )
+            )
         elif text.startswith("/sessions "):
             try:
                 session = agent.store.session(agent.session_id)
@@ -110,7 +116,7 @@ async def chat(agent, root):
             except (RuntimeError, ValueError, OSError) as error:
                 console.print(str(error), markup=False)
         elif text == "/status":
-            console.print(status_panel(agent, renderer))
+            console.print(status_panel(agent, renderer, theme=load_theme()))
         elif text.startswith("/"):
             console.print("Unknown command. Use /help.", style="yellow")
         else:
@@ -175,8 +181,14 @@ async def execute(args):
         path = Path(os.getenv("ECHO_CONFIG_FILE", "echo.yaml")).expanduser().resolve()
         console.print(f"Config file: {path}", markup=False)
         console.print("Edit this YAML file for new sessions. Environment and .env override YAML.")
-        console.print("Resumed sessions retain saved settings.")
-        console.print_json(data={**asdict(config), "context_char_limit": config.context_char_limit})
+        console.print("Resumed sessions retain runtime settings; theme uses the current YAML.")
+        console.print_json(
+            data={
+                **asdict(config),
+                "context_char_limit": config.context_char_limit,
+                "theme": asdict(load_theme()),
+            }
+        )
         return 0
     if args.command in ("status", "doctor"):
         return await doctor(config, sandbox=args.sandbox)
@@ -191,6 +203,7 @@ async def execute(args):
                     store,
                     None if args.all else Path(args.repo).resolve(),
                     include_children=args.all,
+                    theme=load_theme(),
                 ),
             )
             return 0
@@ -198,6 +211,7 @@ async def execute(args):
         if pointer and getattr(args, "sandbox", False):
             raise ValueError("Resumed sessions keep their saved mode; omit --sandbox.")
         repo = Path(getattr(args, "repo", ".")).resolve()
+        use_sandbox = getattr(args, "sandbox", False)
         fallback = None
         while True:
             if pointer:
@@ -224,7 +238,7 @@ async def execute(args):
                     pointer, fallback = fallback, None
                     continue
             else:
-                backend = Sandbox if args.sandbox else LocalWorkspace
+                backend = Sandbox if use_sandbox else LocalWorkspace
                 # Lock the checkout before taking the initial local snapshot.
                 if backend is LocalWorkspace:
                     locks.enter_context(session_lock(LocalWorkspace(repo, root, config), root))
@@ -257,9 +271,17 @@ async def execute(args):
                 return 0 if result["status"] == "completed" else 1
             fallback = key
             pointer = await chat(agent, root)
+            if pointer is NEW_SESSION:
+                current = store.session(key)
+                repo = Path(current["repo"] or current["workspace"]).resolve()
+                use_sandbox = current["mode"] == "sandbox"
             await sandbox.close()
             sandbox = None
             locks.close()
+            if pointer is NEW_SESSION:
+                pointer, fallback = None, None
+                config = Config.from_env()
+                continue
             if not pointer:
                 return 0
     finally:

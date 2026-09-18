@@ -153,3 +153,75 @@ def test_plain_option_removed():
     ):
         with pytest.raises(SystemExit):
             parser.parse_args(args)
+
+
+async def test_new_session_keeps_repo_mode_and_previous_history(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from echo_ai.commands import NEW_SESSION
+    from echo_ai.sandbox import Sandbox
+    from echo_ai.store import workspace_lock
+
+    root, repo, workspace = tmp_path / "state", tmp_path / "repo", tmp_path / "old/workspace"
+    root.mkdir()
+    repo.mkdir()
+    workspace.mkdir(parents=True)
+    store = Store(root / "sessions.sqlite3")
+    previous = store.create(workspace, asdict(Config(max_steps=3)), repo=repo)
+    store.add(previous, {"role": "user", "content": "Keep this history"})
+    store.close()
+    created, seen = [], []
+
+    async def close():
+        pass
+
+    async def inline(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    def resume(path, config):
+        return SimpleNamespace(workspace=path, mode="sandbox", close=close)
+
+    def create(path, state, config):
+        assert path == repo
+        # The previous workspace lock must be released before creating a new one.
+        with workspace_lock(workspace):
+            pass
+        new = tmp_path / "new/workspace"
+        new.mkdir(parents=True)
+        created.append(new)
+        return resume(new, config)
+
+    async def chat(agent, root):
+        seen.append(agent.session_id)
+        if len(seen) == 1:
+            return NEW_SESSION
+        assert agent.session_id != previous
+        assert agent.store.messages(agent.session_id) == []
+        assert agent.store.messages(previous)[0]["content"] == "Keep this history"
+        assert agent.model.config.max_steps == 7
+        assert agent.sandbox.mode == "sandbox"
+        return None
+
+    monkeypatch.setattr(cli, "state_dir", lambda: root)
+    monkeypatch.setattr(Config, "from_env", lambda: Config(max_steps=7))
+    monkeypatch.setattr(Sandbox, "resume", resume)
+    monkeypatch.setattr(Sandbox, "create", create)
+    monkeypatch.setattr(cli.asyncio, "to_thread", inline)
+    monkeypatch.setattr(cli, "chat", chat)
+    assert await cli.execute(cli.build_parser().parse_args(["resume", previous])) == 0
+    assert len(seen) == 2 and len(created) == 1
+
+
+async def test_plain_new_command(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from echo_ai.commands import NEW_SESSION
+
+    async def prompt(_):
+        return "/new"
+
+    monkeypatch.setattr(
+        cli, "make_prompt", lambda *args, **kwargs: SimpleNamespace(prompt_async=prompt)
+    )
+    monkeypatch.setattr(cli.renderer, "plain", True)
+    assert await cli.chat(SimpleNamespace(), tmp_path) is NEW_SESSION

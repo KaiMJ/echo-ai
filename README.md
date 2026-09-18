@@ -37,6 +37,9 @@ uv run echo-ai
 
 
 **Session Management**
+Use `/new` inside chat for a fresh session in the same repository and execution
+mode. The previous session remains available through `/sessions`.
+
 Manage previous sessions and apply changes:
 ```bash
 uv run echo-ai sessions             # List this repository

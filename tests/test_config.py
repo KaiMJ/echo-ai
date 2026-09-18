@@ -121,7 +121,7 @@ def test_invalid_sections(clean_config, content):
 def test_all_config_fields_have_yaml_sections():
     from dataclasses import fields
 
-    from echo_ai.config import YAML_SECTIONS
+    from echo_ai.config_file import YAML_SECTIONS
 
     def leaves(schema):
         return [
@@ -141,3 +141,45 @@ def test_reasoning_replay_yaml_and_env(clean_config, monkeypatch):
     monkeypatch.setenv("ECHO_RETURN_REASONING", "false")
     assert not Config.from_env().return_reasoning
     assert not Config.from_session({}).return_reasoning
+
+
+def test_theme_loads_separately_from_saved_runtime(clean_config):
+    from dataclasses import asdict
+
+    from echo_ai.config import load_theme
+    from echo_ai.theme import Theme
+
+    assert load_theme() == Theme()
+    path = clean_config / "echo.yaml"
+    path.write_text('theme:\n  accent: "#abcdef"\n  input_background: "#101010"\n')
+    config = Config.from_env()
+    assert config == Config()
+    assert "theme" not in asdict(config)
+    assert load_theme().accent == "#abcdef"
+    assert load_theme().styles()["composer"] == "bg:#101010 #eeeeee"
+    saved = asdict(config)
+    path.write_text('theme:\n  accent: "#123456"\n')
+    assert Config.from_session(saved) == config
+    assert load_theme().accent == "#123456"
+    assert not any("turn-" in key for key in load_theme().styles())
+
+
+@pytest.mark.parametrize(
+    "value", ["null", "[]", "{accent: red}", "{accent: 12}", "{accent: null}", '{typo: "#ffffff"}']
+)
+def test_invalid_themes_fail_with_clear_error(clean_config, value):
+    from echo_ai.config import load_theme
+
+    (clean_config / "echo.yaml").write_text("theme: " + value)
+    for load in (Config.from_env, load_theme):
+        with pytest.raises(ValueError, match="theme"):
+            load()
+
+
+def test_theme_custom_file(clean_config, monkeypatch):
+    from echo_ai.config import load_theme
+
+    path = clean_config / "colors.yaml"
+    path.write_text('theme:\n  accent: "#123456"\n')
+    monkeypatch.setenv("ECHO_CONFIG_FILE", str(path))
+    assert load_theme().accent == "#123456"

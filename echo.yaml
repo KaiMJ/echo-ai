@@ -1,4 +1,4 @@
-# New-session defaults. ECHO_* environment variables override these settings.
+# Runtime defaults for new sessions. ECHO_* environment variables override them.
 local-model:
   # base_url defaults to localhost using ECHO_INFERENCE_PORT (8001 by default).
   model: cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit
@@ -42,3 +42,18 @@ tools:
     max_bytes: 1048576 # Maximum resulting file size.
   bash:
     max_timeout: 120
+
+# Interface colors. Quote hex values so YAML does not treat them as comments.
+# Applied on launch, including resumed sessions. Conversation rows stay unshaded.
+theme:
+  foreground: "#eeeeee"
+  accent: "#5fd7df"
+  muted: "#999999"
+  error: "#ff5f5f"
+  warning: "#e5c07b"
+  success: "#98c379"
+  spinner: "#c678dd"
+  input_background: "#262626"
+  input_border: "#555555"
+  selection_background: "#555555"
+  selection_foreground: "#ffffff"

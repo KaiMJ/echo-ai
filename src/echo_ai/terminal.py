@@ -39,6 +39,7 @@ from rich.syntax import Syntax
 from rich.text import Text
 
 from .commands import (
+    NEW_SESSION,
     CommandCompleter,
     help_text,
     sessions_panel,
@@ -46,6 +47,7 @@ from .commands import (
     status_panel,
     status_text,
 )
+from .config import load_theme
 from .ui import safe_text
 
 # prompt_toolkit has no Ctrl+Shift+letter key token. Reserve F24 internally for
@@ -98,11 +100,14 @@ class Entry:
                 file=output,
                 width=max(1, width),
                 force_terminal=True,
-                color_system="standard",
+                color_system="truecolor",
                 highlight=False,
             )
             if self.renderable is not None:
                 console.print(self.renderable)
+            elif self.kind == "user":
+                # User input is literal: preserve newlines and code indentation.
+                console.print(Text(source))
             elif self.kind == "tool":
                 if self.detail:
                     console.print(Text("Arguments", style="dim"))
@@ -171,10 +176,18 @@ class TranscriptControl(UIControl):
         start, end = sorted((self.anchor, self.selection_end))
         lines = []
         for index in range(start[0], end[0] + 1):
-            text = "".join(part[1] for part in self.selection_rows[index][0])
+            fragments = self.selection_rows[index][0]
+            if any("class:bubble-edge" in p[0] for p in fragments):
+                continue
+            text = "".join(part[1] for part in fragments)
             left = start[1] if index == start[0] else 0
             right = end[1] if index == end[0] else len(text)
-            selected = text[left:right]
+            # Mouse positions include the right-alignment gutter, copied text does not.
+            selected = "".join(
+                char
+                for x, (style, char, *_) in enumerate(explode_text_fragments(fragments))
+                if left <= x < right and "class:layout-padding" not in style
+            )
             # Rich pads rendered rows to the viewport; omit that padding when copying.
             lines.append(selected.rstrip() if index < end[0] else selected)
         return "\n".join(lines)
@@ -183,22 +196,29 @@ class TranscriptControl(UIControl):
         fragments = list(self.visible[i][0])
         # Give blank rows and trailing space mouse coordinates in the Window map.
         padding = max(0, self.width - sum(Text(part[1]).cell_len for part in fragments))
-        background = (
-            next((part for part in fragments[0][0].split() if part.startswith("class:turn-")), "")
-            if fragments
-            else ""
-        )
-        fragments.append((background, " " * padding))
+        fragments.append(("class:layout-padding", " " * padding))
         if self.anchor is None:
             return fragments
         start, end = sorted((self.anchor, self.selection_end))
         row = self.offset + i
         if not start[0] <= row <= end[0]:
             return fragments
+        if self.block_entry is not None:
+            return [
+                (
+                    style
+                    if "class:alignment-gutter" in style
+                    else style + " class:block-selection",
+                    text,
+                )
+                for style, text, *_ in fragments
+            ]
         return [
             (
                 style + " class:selection"
-                if (row > start[0] or x >= start[1]) and (row < end[0] or x < end[1])
+                if (row > start[0] or x >= start[1])
+                and (row < end[0] or x < end[1])
+                and not (self.block_text is not None and "class:layout-padding" in style)
                 else style,
                 char,
             )
@@ -248,6 +268,13 @@ class TranscriptControl(UIControl):
             if entry is None:
                 continue
             first_row = len(rows)
+            user = entry.kind == "user" and not self.popup
+            entry_width = width
+            if user:
+                natural_width = max(
+                    Text(line).cell_len for line in [entry.title, *entry.text.split("\n")]
+                )
+                entry_width = max(1, min(natural_width, 80, max(1, width * 7 // 10 - 4)))
             style = "class:heading" if entry.kind == "text" else "class:muted"
             if entry.kind == "user":
                 style = "class:accent"
@@ -271,22 +298,54 @@ class TranscriptControl(UIControl):
                     icon = [("class:warning", "! ")]
                 else:
                     icon = [("class:success", "✓ ")]
-            available = max(0, width - (2 if icon else 0))
+            available = max(0, entry_width - (2 if icon else 0))
             title = fit_text(entry.title, max(0, available - suffix_width)) + suffix
             rows.append((icon + [(style, fit_text(title, available))], entry))
             if self.popup or not entry.expandable or not entry.done:
-                lines = entry.markdown_lines(max(1, width - 1))
+                lines = entry.markdown_lines(max(1, entry_width if user else width - 1))
                 if entry.expandable and not self.popup:
                     lines = lines[-6:]
                 rows.extend((line, entry) for line in lines)
             rows.append(([("", "")], None))
-            background = "class:turn-user" if entry.kind == "user" else "class:turn-echo"
-            for index in range(first_row, len(rows)):
-                fragments, owner = rows[index]
-                rows[index] = (
-                    [(background + " " + style, text) for style, text, *_ in fragments],
-                    owner,
-                )
+            if user:
+                framed = width >= 6
+                bubble_width = entry_width + (4 if framed else 0)
+                gutter = [
+                    ("class:layout-padding class:alignment-gutter", " " * (width - bubble_width))
+                ]
+                border = "class:layout-padding class:user-border"
+                for index in range(first_row, len(rows) - 1):
+                    fragments, owner = rows[index]
+                    padding = max(0, entry_width - sum(Text(p[1]).cell_len for p in fragments))
+                    rows[index] = (
+                        gutter
+                        + ([(border, "│ ")] if framed else [])
+                        + list(fragments)
+                        + [("class:layout-padding", " " * padding)]
+                        + ([(border, " │")] if framed else []),
+                        owner,
+                    )
+                if framed:
+                    rows.insert(
+                        first_row,
+                        (
+                            gutter
+                            + [
+                                (border + " class:bubble-edge", "╭" + "─" * (entry_width + 2) + "╮")
+                            ],
+                            entry,
+                        ),
+                    )
+                    rows.insert(
+                        len(rows) - 1,
+                        (
+                            gutter
+                            + [
+                                (border + " class:bubble-edge", "╰" + "─" * (entry_width + 2) + "╯")
+                            ],
+                            entry,
+                        ),
+                    )
         if self.selection_rows is not None:
             rows = self.selection_rows
         self.rows = rows
@@ -351,6 +410,7 @@ class TranscriptControl(UIControl):
 class TerminalChat:
     def __init__(self, agent, root, renderer, *, input=None, output=None):
         self.agent, self.renderer = agent, renderer
+        self.theme = load_theme()
         self.entries = []
         self.current = {}
         self.drafts = {}
@@ -405,12 +465,16 @@ class TerminalChat:
         @keys.add("escape")
         def close(event):
             control = self.details if self.selected else self.transcript
-            if control.selection_rows is not None:
+            if self.editor.buffer.complete_state is not None:
+                self.editor.buffer.cancel_completion()
+            elif control.selection_rows is not None:
                 control.clear_selection()
             elif self.copy_mode:
                 self.toggle_copy()
-            else:
+            elif self.selected:
                 self.close_details()
+            else:
+                self.editor.text = ""
 
         @keys.add("f2")
         @keys.add("escape", "d")
@@ -499,27 +563,9 @@ class TerminalChat:
             output=output,
             min_redraw_interval=0.016,
             refresh_interval=0.125,
-            style=Style.from_dict(
-                {
-                    "heading": "bold",
-                    "accent": "ansicyan bold",
-                    "muted": "ansibrightblack",
-                    "error": "ansired bold",
-                    "warning": "ansiyellow",
-                    "spinner": "ansimagenta bold",
-                    "success": "ansigreen",
-                    "key": "ansicyan bold",
-                    "selection": "reverse",
-                    "composer": "bg:#262626 #eeeeee",
-                    "turn-user": "bg:#383838 #eeeeee",
-                    "turn-echo": "bg:#303030 #eeeeee",
-                    "composer-box": "bg:#262626 #eeeeee",
-                    "composer-box frame.border": "#555555 bg:#262626",
-                    "frame.border": "ansibrightblack",
-                    "frame.label": "bold",
-                }
-            ),
+            style=Style.from_dict(self.theme.styles()),
         )
+
         # Resolve standalone Esc promptly while leaving time for Alt key sequences.
         self.app.ttimeoutlen = 0.1
         self.app.timeoutlen = 0.5
@@ -635,7 +681,8 @@ class TerminalChat:
             "notice",
             "Commands · Esc close",
             "```text\n" + help_text() + "\n```\n\n"
-            "**Enter** Send · **Ctrl+J** New line · **Ctrl+c** Copy selection or latest answer\n\n"
+            "**Enter** Send · **Ctrl+J** New line · **Ctrl+c** Copy selection / latest answer\n\n"
+            "**Esc** Dismiss completion, selection, or details first; otherwise clear the draft.\n\n"
             "**Ctrl+Shift+C** Copy conversation · **Ctrl+d** Stop / exit\n\n"
             "Click a section or drag to select. Ctrl+Shift+C requires your terminal to forward "
             "the shortcut (CSI-u or modifyOtherKeys).",
@@ -750,6 +797,9 @@ class TerminalChat:
         if text == "/exit":
             self.app.exit()
             return
+        if text == "/new":
+            self.app.exit(result=NEW_SESSION)
+            return
         if text == "/help":
             self.open_details(self.help_entry())
             return
@@ -758,7 +808,7 @@ class TerminalChat:
                 "notice",
                 "Status",
                 status_text(self.agent, self.renderer),
-                renderable=status_panel(self.agent, self.renderer),
+                renderable=status_panel(self.agent, self.renderer, theme=self.theme),
             )
             return
         if text == "/sessions" or text.startswith("/sessions "):
@@ -771,7 +821,10 @@ class TerminalChat:
                         "Sessions",
                         listing,
                         renderable=sessions_panel(
-                            self.agent.store, session["repo"], current=self.agent.session_id
+                            self.agent.store,
+                            session["repo"],
+                            current=self.agent.session_id,
+                            theme=self.theme,
                         ),
                     )
                 else:
