@@ -168,7 +168,59 @@ def test_spinner_animates_and_stops_on_completion(chat, monkeypatch):
     assert lines(chat.transcript)[0] != before
     chat.renderer.emit("tool_end", {"output": "file.md"})
     assert lines(chat.transcript)[0].startswith("✓ ")
-    assert any(style == "class:key" and text == "F3" for style, text in chat.composer_hint())
+    assert any(style == "class:key" and text == "Alt+y" for style, text in chat.composer_hint())
+
+
+def test_drag_highlights_and_copies_without_opening_details(chat):
+    import base64
+
+    chat.renderer.emit("text", "Alpha beta gamma")
+    lines(chat.transcript)
+    for kind, x in (
+        (MouseEventType.MOUSE_DOWN, 0),
+        (MouseEventType.MOUSE_MOVE, 10),
+        (MouseEventType.MOUSE_UP, 10),
+    ):
+        chat.transcript.mouse_handler(
+            MouseEvent(Point(x=x, y=1), kind, MouseButton.LEFT, frozenset())
+        )
+    assert chat.transcript.selected_text() == "Alpha beta"
+    assert chat.selected is None
+    content = chat.transcript.create_content(80, 30)
+    assert any("class:selection" in part[0] for part in content.get_line(1))
+    chat.renderer.emit("text", " streamed later")
+    assert "streamed later" not in "\n".join(lines(chat.transcript))
+    written = []
+    chat.app.output.write_raw = written.append
+    assert chat.copy_selection()
+    assert written == ["\x1b]52;c;" + base64.b64encode(b"Alpha beta").decode() + "\x07"]
+    chat.transcript.clear_selection()
+    assert "streamed later" in "\n".join(lines(chat.transcript))
+
+
+async def test_details_and_copy_commands_do_not_need_function_keys(chat):
+    chat.renderer.emit("reasoning", "Inspect first")
+    await chat.submit("/details")
+    assert chat.selected is chat.entries[0]
+    chat.close_details()
+    await chat.submit("/copy")
+    assert chat.copy_mode and not chat.app.mouse_support()
+
+
+def test_reverse_multiline_drag_in_details_preserves_unicode(chat):
+    entry = chat.add("notice", "Result", "Alpha 界\n\nBeta")
+    chat.open_details(entry)
+    rendered = lines(chat.details)
+    first = next(i for i, line in enumerate(rendered) if "Alpha" in line)
+    last = next(i for i, line in enumerate(rendered) if "Beta" in line)
+    for kind, x, y in (
+        (MouseEventType.MOUSE_DOWN, 4, last),
+        (MouseEventType.MOUSE_MOVE, 0, first),
+        (MouseEventType.MOUSE_UP, 0, first),
+    ):
+        chat.details.mouse_handler(MouseEvent(Point(x=x, y=y), kind, MouseButton.LEFT, frozenset()))
+    assert chat.details.selected_text() == "Alpha 界\n\nBeta"
+    assert chat.selected is entry
 
 
 def test_pty_mouse_popup_multiline_and_exit(tmp_path):
@@ -202,6 +254,11 @@ asyncio.run(chat(Agent(), Path(sys.argv[1])))
         process.expect("echo ›")
         process.send("first\x1b\rsecond\r")
         process.expect("Answer ready")
+        # Drag over the answer, then copy without cancelling or closing the view.
+        process.send("\x1b[<0;3;8M\x1b[<32;9;8M\x1b[<0;9;8m")
+        process.sendcontrol("c")
+        process.expect_exact("\x1b]52;c;QW5zd2Vy\x07")  # "Answer", base64 encoded.
+        process.send("\x1b")
         # User Markdown is one paragraph (first/second), placing reasoning on row 5.
         process.send("\x1b[<0;5;5M\x1b[<0;5;5m")
         process.expect("Trace details")
@@ -213,8 +270,12 @@ asyncio.run(chat(Agent(), Path(sys.argv[1])))
         process.send("\x1b")
         process.sendcontrol("l")
         process.expect("Answer ready")
-        process.send("\x1bOQ")  # F2 reopens the last trace.
+        process.send("\x1bd")  # Alt+d works when terminal function keys are intercepted.
         process.expect("Trace details")
+        process.send("\x1by")
+        process.expect_exact("\x1b[?1000l")
+        process.send("\x1by")
+        process.expect_exact("\x1b[?1000h")
         process.send("\x1b")
         process.sendline("/exit")
         process.expect(pexpect.EOF)

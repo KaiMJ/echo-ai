@@ -60,7 +60,8 @@ async def test_resume_preserves_child_permissions_and_lock_during_close(tmp_path
 
     class FakeSandbox:
         @classmethod
-        def resume(cls, path):
+        def resume(cls, path, config):
+            assert config == Config()
             instance = cls()
             instance.workspace = path
             return instance
@@ -201,6 +202,53 @@ def test_context_uses_latest_prompt_not_cumulative_usage():
     assert ui.child.context == 99
 
 
+def test_generated_tokens_include_thinking_and_tool_deltas_then_use_server_usage():
+    from io import StringIO
+
+    from rich.console import Console
+
+    from echo_ai.ui import Renderer
+
+    ui = Renderer(Console(file=StringIO(), width=160))
+    request = {
+        "context_chars": 300,
+        "context_tokens": 1000,
+        "max_tokens": 100,
+        "remaining": 8,
+        "max_steps": 10,
+    }
+    ui.emit("model_start", request)
+    ui.emit("reasoning", "abcdef")
+    ui.emit("text", "ghi")
+    ui.emit("tool_call_delta", {"index": 0, "name": "read", "arguments": "{"})
+    ui.emit("tool_call_delta", {"index": 0, "name": "read", "arguments": "{}"})
+    assert "Gen ~5" in ui.toolbar()
+    assert "Echo Input [~100 / 1,000]" in ui.toolbar()
+    ui.emit(
+        "model_end",
+        {
+            "usage": {
+                "prompt_tokens": 110,
+                "completion_tokens": 7,
+                "completion_tokens_details": {"reasoning_tokens": 3},
+            }
+        },
+    )
+    assert "Gen 7" in ui.toolbar()
+    assert "thinking: 3 tokens" in ui.main.generated_text(detailed=True)
+    assert ui.main.context == 110
+    ui.emit("child", "review")
+    ui.emit("child_model_start", request)
+    ui.emit("child_reasoning", "abc")
+    assert "Gen ~1" in ui.toolbar()
+    assert ui.main.generated_tokens == 7
+    ui.emit("tool_end", {"findings": "done"})
+    assert "Gen 7" in ui.toolbar()
+    ui.emit("model_start", request)
+    assert "Gen ~0" in ui.toolbar()
+    assert ui.main.reasoning_tokens is None
+
+
 def test_dashboard_handles_resize_and_untrusted_text():
     from io import StringIO
 
@@ -239,26 +287,26 @@ def test_context_display_follows_review_and_returns_to_parent():
     ui.emit("model_end", {"usage": {"prompt_tokens": 350}})
     ui.emit("child", "review-context")
     ui.emit("child_model_start", request)
-    assert "Review Context [~200 / 1,000] 20%" in ui.toolbar()
+    assert "Review Input [~200 / 1,000] 20%" in ui.toolbar()
     ui.emit("child_model_end", {"usage": {"prompt_tokens": 99}})
-    assert "Review Context [99 / 1,000] 10%" in ui.toolbar()
+    assert "Review Input [99 / 1,000] 10%" in ui.toolbar()
     for width, height in ((120, 35), (70, 22), (40, 12)):
         console.size = (width, height)
         output.seek(0)
         output.truncate()
         console.print(ui.dashboard())
         displayed = output.getvalue()
-        assert "Review Context" in displayed
+        assert "Review Input" in displayed
         assert "99 / 1,000" in displayed
         assert "350 / 1,000" not in displayed
 
     ui.emit("child_run_end", {"status": "completed"})
     ui.emit("tool_end", {"findings": "Review complete"})
-    assert "Echo Context [350 / 1,000] 35%" in ui.toolbar()
+    assert "Echo Input [350 / 1,000] 35%" in ui.toolbar()
     assert "350 / 1,000" in ui.active_context_text()
     assert ui.child.context == 99
     ui.emit("model_start", request)
-    assert "Echo Context [~200 / 1,000] 20%" in ui.toolbar()
+    assert "Echo Input [~200 / 1,000] 20%" in ui.toolbar()
 
 
 def test_stream_preview_keeps_latest_wrapped_lines_visible():
@@ -390,7 +438,7 @@ asyncio.run(chat(agent, Path(sys.argv[1])))
         process.expect("Inspect cleanup")
         process.expect("sandbox.py")
         process.setwinsize(22, 70)
-        process.expect("Context")
+        process.expect("Input")
         process.sendcontrol("c")
         process.expect("Cancelled")
         process.sendline("/exit")

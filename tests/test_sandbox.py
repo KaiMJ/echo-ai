@@ -133,3 +133,19 @@ def test_binary_patch_applies_to_original_checkout(tmp_path):
     subprocess.run(["git", "-C", str(repo), "apply", "-"], input=patch, text=True, check=True)
     assert (repo / "existing.bin").read_bytes() == changed
     assert (repo / "added.bin").read_bytes() == added
+
+
+async def test_configured_file_limits_in_container(sandbox):
+    from dataclasses import replace
+
+    sandbox.config = replace(
+        sandbox.config, read_max_lines=1, read_default_lines=1, max_write_bytes=3, max_edit_bytes=3
+    )
+    (sandbox.workspace / "lines.txt").write_text("first\nsecond\n")
+    result = await sandbox.execute("read", {"path": "lines.txt", "limit": 100})
+    assert result["output"] == "1: first\n"
+    result = await sandbox.execute("write", {"path": "new.txt", "content": "four"})
+    assert "3 bytes" in result["error"]
+    result = await sandbox.execute("edit", {"path": "lines.txt", "old": "first", "new": "longer"})
+    assert "3 bytes" in result["error"]
+    assert (sandbox.workspace / "lines.txt").read_text() == "first\nsecond\n"

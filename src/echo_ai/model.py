@@ -9,6 +9,16 @@ import httpx
 from .config import Config
 
 
+def request_messages(messages, *, return_reasoning=False):
+    """Build inference history according to the configured reasoning replay policy."""
+    if return_reasoning:
+        return [dict(message) for message in messages]
+    return [
+        {k: v for k, v in message.items() if k not in {"reasoning", "reasoning_content"}}
+        for message in messages
+    ]
+
+
 class Model:
     def __init__(self, config: Config, transport=None):
         self.config = config
@@ -16,7 +26,7 @@ class Model:
 
     async def complete(self, messages: list[dict], tools: list[dict], emit):
         started = time.monotonic()
-        text, calls, usage = "", {}, {}
+        text, thinking, calls, usage = "", "", {}, {}
         first_token = None
         finished = False
         headers = {"Authorization": f"Bearer {os.getenv('ECHO_API_KEY', 'local')}"}
@@ -28,7 +38,9 @@ class Model:
                 headers=headers,
                 json={
                     "model": self.config.model,
-                    "messages": messages,
+                    "messages": request_messages(
+                        messages, return_reasoning=self.config.return_reasoning
+                    ),
                     "tools": tools,
                     "tool_choice": "auto",
                     "stream": True,
@@ -37,7 +49,7 @@ class Model:
                     "temperature": self.config.temperature,
                     "top_p": self.config.top_p,
                     "top_k": self.config.top_k,
-                    "chat_template_kwargs": {"enable_thinking": True},
+                    "chat_template_kwargs": {"enable_thinking": self.config.reasoning_enabled},
                 },
             ) as response,
         ):
@@ -56,6 +68,7 @@ class Model:
                     delta = choice.get("delta", {})
                     reasoning = delta.get("reasoning") or delta.get("reasoning_content") or ""
                     if reasoning:
+                        thinking += reasoning
                         if first_token is None:
                             first_token = time.monotonic() - started
                         emit("reasoning", reasoning)
@@ -102,4 +115,6 @@ class Model:
         message = {"role": "assistant", "content": text or None}
         if ordered:
             message["tool_calls"] = ordered
+        if thinking:
+            message["reasoning"] = thinking
         return message, {"seconds": time.monotonic() - started, "ttft": first_token, **usage}

@@ -180,12 +180,12 @@ async def execute(args):
             return 0
         if args.command in ("resume", "diff"):
             session = store.session(args.session)
-            sandbox = await asyncio.to_thread(Sandbox.resume, Path(session["workspace"]))
             config = Config.from_session(json.loads(session["config"]))
+            sandbox = await asyncio.to_thread(Sandbox.resume, Path(session["workspace"]), config)
             key = args.session
             child = session["parent_id"] is not None
         else:
-            sandbox = await asyncio.to_thread(Sandbox.create, Path(args.repo).resolve(), root)
+            sandbox = await asyncio.to_thread(Sandbox.create, Path(args.repo).resolve(), root, config)
             key = store.create(sandbox.workspace, asdict(config))
         locks.enter_context(workspace_lock(sandbox.workspace))
         if args.command == "diff":

@@ -8,7 +8,8 @@ from dataclasses import asdict
 import httpx
 from jsonschema import ValidationError, validate
 
-from .tools import DELEGATE, TOOLS
+from .model import request_messages
+from .tools import DELEGATE, tools_for
 
 SYSTEM = """You are Echo, a coding agent working in a disposable Docker workspace.
 Inspect relevant files before editing. Make the smallest correct change. Run relevant tests.
@@ -34,7 +35,9 @@ class Agent:
         self.budget = budget
         self._shared_budget = budget
         self.tools = [
-            t for t in TOOLS if not child or t["function"]["name"] in ("read", "search", "list")
+            t
+            for t in tools_for(model.config)
+            if not child or t["function"]["name"] in ("read", "search", "list")
         ]
         if not child:
             self.tools = self.tools + [DELEGATE]
@@ -70,9 +73,13 @@ class Agent:
             "ttft": None,
         }
         status = "failed"
+        messages = request_messages(
+            self.store.messages(self.session_id), return_reasoning=config.return_reasoning
+        )
         try:
-            for _ in range(min(config.max_steps, 8) if self.child else config.max_steps):
-                messages = self.store.messages(self.session_id)
+            for _ in range(
+                min(config.max_steps, config.child_max_steps) if self.child else config.max_steps
+            ):
                 if len(json.dumps(messages)) > config.context_char_limit:
                     raise RuntimeError(
                         "Approximate context budget reached. Start a new session with a focused "
@@ -84,8 +91,10 @@ class Agent:
                 self.emit(
                     "model_start",
                     {
+                        "return_reasoning": config.return_reasoning,
                         "context_chars": len(json.dumps(messages)),
                         "context_tokens": config.context_tokens,
+                        "max_tokens": config.max_tokens,
                         "remaining": self.budget["remaining"],
                         "max_steps": config.max_steps,
                     },
@@ -98,6 +107,9 @@ class Agent:
                     metrics[name] += usage.get(name, 0)
                 self.emit("model_end", {"usage": usage, "metrics": dict(metrics)})
                 self.store.add(self.session_id, message)
+                messages.extend(
+                    request_messages([message], return_reasoning=config.return_reasoning)
+                )
                 calls = message.get("tool_calls", [])
                 if not calls:
                     status = "completed"
@@ -144,10 +156,13 @@ class Agent:
                     metrics["tool_seconds"] += time.monotonic() - tool_started
                     if result.get("error") or result.get("exit_code", 0) != 0:
                         metrics["tool_errors"] += 1
-                    self.store.add(
-                        self.session_id,
-                        {"role": "tool", "tool_call_id": call["id"], "content": json.dumps(result)},
-                    )
+                    tool_message = {
+                        "role": "tool",
+                        "tool_call_id": call["id"],
+                        "content": json.dumps(result),
+                    }
+                    self.store.add(self.session_id, tool_message)
+                    messages.append(tool_message)
                     self.emit("tool_end", result)
             raise RuntimeError("Step budget reached. Inspect the diff before continuing.")
         except asyncio.CancelledError:

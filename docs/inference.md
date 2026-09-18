@@ -58,7 +58,10 @@ unless `ECHO_BASE_URL` is explicitly set.
 The checkpoint declares `compressed-tensors` quantization; vLLM reads that
 configuration automatically. Do not force `--quantization awq` based on the
 repository name. The model's bundled chat template is used. Echo requests
-`chat_template_kwargs={"enable_thinking": false}` for its initial coding loop.
+`chat_template_kwargs={"enable_thinking": true}` by default. Set
+`reasoning_enabled: false` in `echo.yaml` to disable it. Reasoning traces are
+stored locally. `local-model.return_reasoning` controls whether they are sent
+back to inference (default: `false`), independently of generation.
 Only text inference is enabled.
 
 Sampling follows the model card: temperature 1.0, top-p 0.95, and top-k 64.

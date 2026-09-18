@@ -15,10 +15,9 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from .sandbox_tools import MAX_OUTPUT
+from .config import Config
 
 IMAGE = "echo-ai-sandbox:local"
-MAX_WORKSPACE = 512 * 1024 * 1024
 
 
 def _git_env() -> dict[str, str]:
@@ -45,19 +44,19 @@ def _git(workspace: Path, *args: str) -> str:
     )
 
 
-def _workspace_size(workspace: Path) -> int:
+def _workspace_size(workspace: Path, max_bytes: int) -> int:
     size = 0
     for base, dirs, files in os.walk(workspace, followlinks=False):
         for name in files:
             size += (Path(base) / name).lstat().st_size
-            if size > MAX_WORKSPACE:
+            if size > max_bytes:
                 raise ValueError(
-                    "Workspace exceeds the 512 MiB limit; remove files before continuing"
+                    f"Workspace exceeds the {max_bytes:,}-byte limit; remove files before continuing"
                 )
     return size
 
 
-def _copy_repository(repo: Path, workspace: Path) -> None:
+def _copy_repository(repo: Path, workspace: Path, max_bytes: int) -> None:
     # Git's ignore rules exclude virtualenvs, local utilities, and secrets such
     # as ignored .env files. Non-Git directories deliberately require setup.
     raw = subprocess.check_output(
@@ -90,25 +89,27 @@ def _copy_repository(repo: Path, workspace: Path) -> None:
         if not source.resolve().is_relative_to(repo):
             continue
         total += source.stat().st_size
-        if total > MAX_WORKSPACE:
-            raise ValueError("Repository exceeds the 512 MiB workspace limit")
+        if total > max_bytes:
+            raise ValueError(f"Repository exceeds the {max_bytes:,}-byte workspace limit")
         target = workspace / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
 
 
 class Sandbox:
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, config: Config | None = None):
+        self.config = config or Config()
         self.workspace = workspace.resolve()
         self._container: str | None = None
         self._lock = asyncio.Lock()
 
     @classmethod
-    def create(cls, repo: Path, state_dir: Path) -> Sandbox:
+    def create(cls, repo: Path, state_dir: Path, config: Config | None = None) -> Sandbox:
+        config = config or Config()
         repo = repo.resolve()
         workspace = state_dir.resolve() / uuid.uuid4().hex / "workspace"
         workspace.mkdir(parents=True)
-        _copy_repository(repo, workspace)
+        _copy_repository(repo, workspace, config.max_workspace_bytes)
         _git(workspace, "init", "--quiet")
         _git(workspace, "add", "--all")
         _git(
@@ -123,14 +124,14 @@ class Sandbox:
             "-m",
             "Workspace baseline",
         )
-        return cls(workspace)
+        return cls(workspace, config)
 
     @classmethod
-    def resume(cls, workspace: Path) -> Sandbox:
+    def resume(cls, workspace: Path, config: Config | None = None) -> Sandbox:
         workspace = workspace.resolve()
         if not workspace.is_dir() or not (workspace.parent / "baseline.git").is_dir():
             raise ValueError("Session workspace or baseline is missing")
-        return cls(workspace)
+        return cls(workspace, config)
 
     async def _docker(self, *args: str) -> tuple[int, str]:
         proc = await asyncio.create_subprocess_exec(
@@ -163,22 +164,37 @@ class Sandbox:
             "--read-only",
             "--cap-drop=ALL",
             "--security-opt=no-new-privileges",
-            "--pids-limit=128",
-            "--memory=1g",
-            "--memory-swap=1g",
-            "--cpus=2",
+            f"--pids-limit={self.config.sandbox_pids}",
+            f"--memory={self.config.sandbox_memory_bytes}",
+            f"--memory-swap={self.config.sandbox_memory_bytes}",
+            f"--cpus={self.config.sandbox_cpus}",
             "--ulimit",
-            "fsize=67108864:67108864",
+            f"fsize={self.config.sandbox_file_bytes}:{self.config.sandbox_file_bytes}",
             "--user",
             f"{os.getuid()}:{os.getgid()}",
             "--tmpfs",
-            "/tmp:rw,nosuid,nodev,size=128m,mode=1777",
+            f"/tmp:rw,nosuid,nodev,size={self.config.sandbox_tmp_bytes},mode=1777",
             "--mount",
             f"type=bind,src={self.workspace},dst=/workspace",
             "--env",
             "HOME=/tmp",
             "--env",
             "PYTHONDONTWRITEBYTECODE=1",
+            "--env",
+            "ECHO_TOOL_LIMITS="
+            + json.dumps(
+                {
+                    name: getattr(self.config, name)
+                    for name in (
+                        "max_output_bytes",
+                        "max_write_bytes",
+                        "max_edit_bytes",
+                        "read_max_lines",
+                        "read_default_lines",
+                        "search_max_matches",
+                    )
+                }
+            ),
             IMAGE,
         )
         if code:
@@ -197,7 +213,7 @@ class Sandbox:
     async def execute(self, tool: str, args: dict, *, on_output=None) -> dict:
         async with self._lock:
             try:
-                _workspace_size(self.workspace)
+                _workspace_size(self.workspace, self.config.max_workspace_bytes)
                 await self._start()
                 return await self._execute(tool, args, on_output=on_output)
             except asyncio.CancelledError:
@@ -208,7 +224,10 @@ class Sandbox:
                 return {"error": str(exc)}
 
     async def _execute(self, tool: str, args: dict, *, on_output=None) -> dict:
-        timeout = min(max(float(args.get("timeout", 60)), 1), 120)
+        timeout = min(
+            max(float(args.get("timeout", self.config.tool_timeout)), 1),
+            self.config.tool_max_timeout,
+        )
         command = (
             ["bash", "-lc", str(args["command"])]
             if tool == "bash"
@@ -234,7 +253,7 @@ class Sandbox:
         async def collect() -> None:
             nonlocal truncated
             while block := await proc.stdout.read(8192):
-                remaining = MAX_OUTPUT - len(chunks)
+                remaining = self.config.max_output_bytes - len(chunks)
                 captured = block[: max(remaining, 0)]
                 chunks.extend(captured)
                 if on_output is not None and tool == "bash" and captured:
@@ -263,7 +282,7 @@ class Sandbox:
         output = chunks.decode(errors="replace")
         if truncated:
             output += "\n[output truncated]"
-        _workspace_size(self.workspace)
+        _workspace_size(self.workspace, self.config.max_workspace_bytes)
         if tool != "bash" and not truncated:
             try:
                 return json.loads(output)
@@ -274,7 +293,7 @@ class Sandbox:
     def diff(self) -> str:
         # Include new files without changing the baseline. Configuration and hooks
         # live outside the writable container mount.
-        _workspace_size(self.workspace)
+        _workspace_size(self.workspace, self.config.max_workspace_bytes)
         _git(self.workspace, "add", "--all")
         return _git(
             self.workspace,

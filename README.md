@@ -38,23 +38,22 @@ uv run echo-ai chat --repo .
 *   `Alt+Enter`: Newline.
 *   `Ctrl-C`: Cancel current turn.
 *   `Ctrl-D`: Exit.
-*   Commands: `/help`, `/status`, `/diff`, `/exit`.
-
-Interactive chat uses one persistent, scrollable transcript with Markdown for
-answers, reasoning, and tool traces. Answers stay in place when generation finishes.
-Reasoning and tool previews collapse when finished; click their header to open a
-scrollable detail popup, then press `Esc` to close it. `F2` opens the latest trace.
-Use the mouse wheel or `PgUp`/`PgDn` to browse and `Ctrl-End` to follow new output.
-The footer stays visible and shows `[used / capacity]` context tokens for the active agent.
+*   Commands: `/help`, `/status`, `/diff`, `/details`, `/copy`, `/exit`.
 
 Tool arguments stream as the model generates them. Shell output streams as the
 process flushes it; structured file-tool results appear at completion. Trace popups
-retain this chat's reasoning in memory; reasoning is not restored after restarting.
-Tool results and conversation messages remain in the session store.
+retain this chat's reasoning in memory. Completed reasoning traces, tool results,
+and conversation messages are saved in SQLite; trace popups are not restored
+after restarting.
 
-Context is a character-based estimate before a request, then the server-reported
-prompt token count when available. It is not cumulative token usage or a live
-tokenizer measurement. The call budget is shared with review subagents.
+Input and generated counts use `~` for character-based estimates until server
+usage arrives. They are per-request, not cumulative usage or live tokenizer
+measurements. `/status` explains the counts and shows the generation limit.
+Thinking consumes the output budget. By default, its trace is not sent back to
+the model and does not count against the client prompt context guard. With
+`local-model.return_reasoning: true`, saved traces are sent in request history
+and included in the input estimate and context guard. The call budget
+is shared with review subagents.
 
 Use `uv run echo-ai chat --repo . --plain` (also available for `run` and `resume`)
 to disable live redraws. Redirected output is automatically append-only. Color
@@ -85,3 +84,35 @@ uv run echo-ai diff <SESSION_ID> --output change.patch # Export a patch
 - [Architecture](docs/architecture.md): Code map and session behavior.
 - [Inference](docs/inference.md): GPU deployment and resizing.
 - [Sandbox limits](docs/security.md): Isolation details and risks.
+
+## Configuration
+
+Edit `echo.yaml` in the current directory. Settings are grouped under
+`local-model`, `agent`, `sandbox`, and `tools`. The `local-model` section controls reasoning,
+context and output limits, sampling, and model timeout; `agent` controls the call budget. The same file
+also controls workspace size, tool read/write/output limits, tool timeouts,
+subagent steps, and Docker CPU, memory, process, file, and temporary-disk limits.
+`tools` has `defaults`, `read`, `search`, `write`, `edit`, and `bash` sections.
+Defaults apply to all sandbox tools, including `list`. The edit size limit applies
+to the resulting file. Sizes use bytes and timeouts use seconds. Rebuild the sandbox image after this
+update so file tools receive the configured limits:
+`docker build -t echo-ai-sandbox:local .`. Set
+`ECHO_CONFIG_FILE=/path/to/config.yaml` to select another file. Unknown keys and
+invalid values are rejected. Precedence is exported environment variables,
+`.env`, YAML, then built-in defaults. Existing `ECHO_*` overrides still work;
+remove them from `.env` when moving those settings to YAML.
+
+`reasoning_enabled: false` disables thinking through the server's chat template.
+`return_reasoning: false` (the default) excludes saved reasoning from requests;
+set it to `true` to send traces from previous calls and user turns back to the
+model. This is independent of `reasoning_enabled`, which controls generation.
+Completed reasoning traces are saved in SQLite in either mode.
+`ECHO_RETURN_REASONING=true` provides an environment override.
+API credentials remain in `ECHO_API_KEY`, outside the YAML file.
+`uv run echo-ai config` shows effective settings for new sessions. Resumed
+sessions retain their saved configuration.
+
+Docker Compose still reads server deployment settings from `.env`, including
+`ECHO_CONTEXT_TOKENS` and `ECHO_MODEL`. The YAML context limit controls the client;
+it does not resize the inference server. Keep it within the server's limit and
+use `uv run echo-ai doctor` to check.

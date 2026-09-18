@@ -1,5 +1,9 @@
 """Small explicit tool schemas shared by validation and the model."""
 
+from copy import deepcopy
+
+from .config import Config
+
 
 def function(name, description, properties, required):
     return {
@@ -26,7 +30,7 @@ TOOLS = [
         {
             "path": STRING,
             "offset": {"type": "integer", "minimum": 1},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+            "limit": {"type": "integer", "minimum": 1, "maximum": Config().read_max_lines},
         },
         ["path"],
     ),
@@ -51,7 +55,10 @@ TOOLS = [
     function(
         "bash",
         "Run bash in the sandbox. Use for tests and repository commands.",
-        {"command": STRING, "timeout": {"type": "integer", "minimum": 1, "maximum": 120}},
+        {
+            "command": STRING,
+            "timeout": {"type": "integer", "minimum": 1, "maximum": Config().tool_max_timeout},
+        },
         ["command"],
     ),
 ]
@@ -62,3 +69,15 @@ DELEGATE = function(
     {"task": STRING},
     ["task"],
 )
+
+
+def tools_for(config: Config):
+    tools = deepcopy(TOOLS)
+    for tool in tools:
+        spec = tool["function"]
+        props = spec["parameters"]["properties"]
+        if spec["name"] == "read":
+            props["limit"]["maximum"] = config.read_max_lines
+        elif spec["name"] == "bash":
+            props["timeout"]["maximum"] = config.tool_max_timeout
+    return tools

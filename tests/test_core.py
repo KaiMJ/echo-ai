@@ -64,7 +64,100 @@ async def test_reasoning_is_emitted_and_not_stored_as_content():
     model = Model(Config(), httpx.MockTransport(lambda _: httpx.Response(200, text=body)))
     message, _ = await model.complete([], [], lambda kind, value: events.append((kind, value)))
     assert message["content"] == "done"
+    assert message["reasoning"] == "plan then answer"
     assert events == [("reasoning", "plan "), ("reasoning", "then answer"), ("text", "done")]
+
+
+async def test_reasoning_is_saved_but_never_sent(tmp_path):
+    from io import StringIO
+
+    from rich.console import Console
+
+    from echo_ai.ui import Renderer
+
+    renderer = Renderer(Console(file=StringIO()))
+    requests, events, input_counts = [], [], []
+
+    def emit(kind, value):
+        previous_input = renderer.active.context
+        renderer.emit(kind, value)
+        events.append((kind, value))
+        if kind == "model_start":
+            input_counts.append(renderer.active.context)
+        if kind == "reasoning":
+            assert renderer.active.context == previous_input
+            assert renderer.active.generated_chars > 0
+
+    tool = call("list", {"path": "."})["tool_calls"][0]
+    bodies = iter(
+        [
+            sse(
+                {"choices": [{"delta": {"reasoning": "Inspect "}}]},
+                {"choices": [{"delta": {"reasoning_content": "the files."}}]},
+                {
+                    "choices": [
+                        {
+                            "delta": {"tool_calls": [{"index": 0, **tool}]},
+                            "finish_reason": "tool_calls",
+                        }
+                    ]
+                },
+            ),
+            sse(
+                {
+                    "choices": [
+                        {
+                            "delta": {"content": "Done", "reasoning": "Finished"},
+                            "finish_reason": "stop",
+                        }
+                    ]
+                }
+            ),
+            sse({"choices": [{"delta": {"content": "Next answer"}, "finish_reason": "stop"}]}),
+        ]
+    )
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, text=next(bodies))
+
+    store = Store(tmp_path / "state.db")
+    key = store.create(tmp_path, {})
+    agent = Agent(
+        Model(Config(), httpx.MockTransport(respond)),
+        store,
+        FakeSandbox(tmp_path),
+        key,
+        emit,
+    )
+    await agent.run("Inspect files")
+    assistant = requests[1]["messages"][-2]
+    assert "reasoning" not in assistant
+    assert assistant["content"] is None
+    assert requests[1]["messages"][-1]["role"] == "tool"
+    start = [value for kind, value in events if kind == "model_start"][1]
+    assert start["context_chars"] == len(json.dumps(requests[1]["messages"]))
+    assert [m["reasoning"] for m in store.messages(key) if "reasoning" in m] == [
+        "Inspect the files.",
+        "Finished",
+    ]
+    await agent.run("Another task")
+    assert all("reasoning" not in message for message in requests[2]["messages"])
+    assert input_counts == [(len(json.dumps(request["messages"])) + 2) // 3 for request in requests]
+    store.close()
+
+
+async def test_saved_reasoning_does_not_consume_prompt_budget(tmp_path):
+    store = Store(tmp_path / "state.db")
+    key = store.create(tmp_path, {})
+    message = {**call("list", {"path": "."}), "reasoning": "x" * 6000}
+    model = FakeModel([message, {"role": "assistant", "content": "Recovered"}])
+    model.config = Config(max_context_chars=5000)
+    agent = Agent(model, store, FakeSandbox(tmp_path), key)
+    assert (await agent.run("Inspect"))["text"] == "Recovered"
+    assert any(m.get("reasoning") == "x" * 6000 for m in store.messages(key))
+    assert all("reasoning" not in m for request in model.requests for m in request)
+    store.close()
 
 
 @pytest.mark.parametrize("ending", [None, "length"])
@@ -103,8 +196,10 @@ class FakeModel:
 
     def __init__(self, messages):
         self.responses = iter(messages)
+        self.requests = []
 
-    async def complete(self, *_):
+    async def complete(self, messages, *_):
+        self.requests.append(json.loads(json.dumps(messages)))
         response = next(self.responses)
         if isinstance(response, BaseException):
             raise response
@@ -190,8 +285,8 @@ async def test_delegate_links_sessions_and_shares_budget(tmp_path):
     sandbox = FakeSandbox(tmp_path)
     model = FakeModel(
         [
-            call("delegate", {"task": "Read a.py"}),
-            call("read", {"path": "a.py"}, "child-call"),
+            {**call("delegate", {"task": "Read a.py"}), "reasoning": "Parent plan"},
+            {**call("read", {"path": "a.py"}, "child-call"), "reasoning": "Child plan"},
             {"role": "assistant", "content": "Reviewed a.py"},
             {"role": "assistant", "content": "Review complete"},
         ]
@@ -204,6 +299,12 @@ async def test_delegate_links_sessions_and_shares_budget(tmp_path):
     assert len(children) == 1
     assert result["metrics"]["model_calls"] == 4
     assert result["metrics"]["tool_calls"] == 2
+    assert "Child plan" not in json.dumps(model.requests[2])
+    assert any(m.get("reasoning") == "Child plan" for m in store.messages(children[0]["id"]))
+    assert "Parent plan" not in json.dumps(model.requests[2])
+    assert "Parent plan" not in json.dumps(model.requests[3])
+    assert any(m.get("reasoning") == "Parent plan" for m in store.messages(key))
+    assert "Child plan" not in json.dumps(model.requests[3])
     assert sandbox.calls == [("read", {"path": "a.py"})]
     assert ("child_task", "Read a.py") in events
     assert ("child_tool_detail", {"name": "read", "args": {"path": "a.py"}}) in events
@@ -249,4 +350,41 @@ async def test_resumed_review_gets_a_fresh_budget_each_turn(tmp_path):
     agent = Agent(model, store, FakeSandbox(tmp_path), key, child=True)
     assert (await agent.run("first"))["status"] == "completed"
     assert (await agent.run("second"))["status"] == "completed"
+    store.close()
+
+
+@pytest.mark.parametrize("return_reasoning", [False, True])
+async def test_reasoning_policy_covers_history_tool_loop_and_input_counter(
+    tmp_path, return_reasoning
+):
+    from io import StringIO
+
+    from rich.console import Console
+
+    from echo_ai.ui import Renderer
+
+    store = Store(tmp_path / "state.db")
+    key = store.create(tmp_path, {})
+    store.add(key, {"role": "assistant", "content": "Earlier", "reasoning_content": "Old trace"})
+    model = FakeModel(
+        [
+            {**call("list", {"path": "."}), "reasoning": "Current trace"},
+            {"role": "assistant", "content": "Done", "reasoning": "Final trace"},
+        ]
+    )
+    model.config = Config(return_reasoning=return_reasoning)
+    renderer = Renderer(Console(file=StringIO()))
+    inputs = []
+
+    def emit(kind, value):
+        renderer.emit(kind, value)
+        if kind == "model_start":
+            inputs.append(renderer.active.context)
+            assert renderer.active.return_reasoning == return_reasoning
+
+    await Agent(model, store, FakeSandbox(tmp_path), key, emit).run("Inspect")
+    assert ("Old trace" in json.dumps(model.requests[0])) == return_reasoning
+    assert ("Current trace" in json.dumps(model.requests[1])) == return_reasoning
+    assert inputs == [(len(json.dumps(request)) + 2) // 3 for request in model.requests]
+    assert any(m.get("reasoning") == "Final trace" for m in store.messages(key))
     store.close()

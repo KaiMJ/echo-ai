@@ -2,7 +2,7 @@
 
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from rich.console import Console, Group
 from rich.live import Live
@@ -27,13 +27,36 @@ class Activity:
     context: int | None = None
     capacity: int = 0
     estimated: bool = True
+    generated_chars: int = 0
+    tool_chars: dict = field(default_factory=dict)
+    generated_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    output_limit: int = 0
+    requested: bool = False
+    return_reasoning: bool = False
 
-    def context_text(self, *, label="Context"):
+    def context_text(self, *, label="Input"):
         if self.context is None or not self.capacity:
             return f"{label}: awaiting first request"
         ratio = self.context / self.capacity
         prefix = "~" if self.estimated else ""
         return f"{label} [{prefix}{self.context:,} / {self.capacity:,}] {ratio:.0%}"
+
+    def generated_text(self, *, detailed=False):
+        if not self.requested:
+            return "Generated: awaiting first request"
+        count = self.generated_tokens
+        estimated = count is None
+        if estimated:
+            count = (self.generated_chars + sum(self.tool_chars.values()) + 2) // 3
+        value = f"{'~' if estimated else ''}{count:,}"
+        if not detailed:
+            return f"Gen {value}"
+        limit = f" / {self.output_limit:,}" if self.output_limit else ""
+        text = f"Generated this request: {value}{limit} tokens (thinking + answer + tool calls)"
+        if self.reasoning_tokens is not None:
+            text += f"; thinking: {self.reasoning_tokens:,} tokens"
+        return text
 
 
 class Renderer:
@@ -59,6 +82,7 @@ class Renderer:
         if config:
             self.model = config.model.rsplit("/", 1)[-1]
             self.main.capacity = config.context_tokens
+            self.main.return_reasoning = getattr(config, "return_reasoning", False)
         self.plain = plain
 
     def start(self):
@@ -71,6 +95,7 @@ class Renderer:
         self.main.status = "Waiting for model"
         self.main.text = ""
         self.main.reasoning = ""
+        self.main.requested = False
         if (
             self.console.is_terminal
             and not self.console.is_dumb_terminal
@@ -80,7 +105,7 @@ class Renderer:
             self.live = Live(
                 get_renderable=self.dashboard,
                 console=self.console,
-                refresh_per_second=4,
+                refresh_per_second=1 / 0.15,
                 transient=True,
             )
             self.live.start()
@@ -143,12 +168,16 @@ class Renderer:
         prefix = f"{activity.label} · " if is_child else ""
         if kind == "reasoning":
             text = safe_text(value)
+            activity.generated_chars += len(str(value))
+            activity.requested = True
             activity.reasoning += text
             activity.status = "Thinking"
             if not self.live:
                 self.print(text, end="", style="dim italic", markup=False)
         elif kind == "text":
             text = safe_text(value)
+            activity.generated_chars += len(str(value))
+            activity.requested = True
             if text and activity.reasoning and not activity.text and not self.live:
                 self.print("\n")
             activity.text += text
@@ -158,12 +187,23 @@ class Renderer:
         elif kind == "model_start":
             activity.status = "Waiting for model"
             activity.context = (value["context_chars"] + 2) // 3
+            activity.return_reasoning = value.get("return_reasoning", False)
             activity.capacity = value["context_tokens"]
             activity.estimated = True
+            activity.generated_chars = 0
+            activity.tool_chars.clear()
+            activity.generated_tokens = activity.reasoning_tokens = None
+            activity.output_limit = value.get("max_tokens", 0)
+            activity.requested = True
             self.remaining = value["remaining"]
             self.max_steps = value["max_steps"]
         elif kind == "model_end":
             usage = value["usage"]
+            activity.requested = True
+            activity.generated_tokens = usage.get("completion_tokens")
+            activity.reasoning_tokens = (usage.get("completion_tokens_details") or {}).get(
+                "reasoning_tokens"
+            )
             if "prompt_tokens" in usage:
                 activity.context = usage["prompt_tokens"]
                 activity.estimated = False
@@ -171,6 +211,9 @@ class Renderer:
             self.output_tokens += usage.get("completion_tokens", 0)
             self.ttft = usage.get("ttft")
             self.flush(activity)
+        elif kind == "tool_call_delta":
+            activity.requested = True
+            activity.tool_chars[value["index"]] = len(value["name"]) + len(value["arguments"])
         elif kind == "tool_start":
             self.flush(activity)
             self.tools += 1
@@ -210,7 +253,7 @@ class Renderer:
         return self.main
 
     def active_context_text(self):
-        label = "Review Context" if self.active is self.child else "Echo Context"
+        label = "Review Input" if self.active is self.child else "Echo Input"
         return self.active.context_text(label=label)
 
     def dashboard(self):
@@ -268,10 +311,20 @@ class Renderer:
         hint = "Ctrl-C cancel" if streaming else "/help"
         status = active.status.replace("\n", " ")
         details = f"{context} · {status} · {hint}"
-        candidates = [f"{self.model} · {details}" if self.model else details, details, context]
+        tokens = context
+        if active.requested:
+            tokens += f" · {active.generated_text()}"
+            details = f"{tokens} · {status} · {hint}"
+        candidates = [
+            f"{self.model} · {details}" if self.model else details,
+            details,
+            tokens,
+            context,
+        ]
         # Keep token counts ahead of model metadata when space is limited.
         if active.context is not None and active.capacity:
             prefix = "~" if active.estimated else ""
+            candidates.append(f"In [{prefix}{active.context:,} / {active.capacity:,}]")
             candidates.append(f"[{prefix}{active.context:,} / {active.capacity:,}]")
         width = max(1, self.console.width - 2)
         for candidate in candidates:

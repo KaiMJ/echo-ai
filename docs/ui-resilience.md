@@ -10,19 +10,40 @@ Tool arguments render separately as JSON. Markdown reads remove tool line prefix
 other source files use syntax highlighting. Listings, shell output, and search
 matches remain literal text with their original line breaks.
 
-F3 freezes the displayed entries and disables application mouse reporting so the
+Dragging in the transcript or popup highlights a frozen snapshot. Ctrl-C requests
+copying through the terminal's OSC 52 clipboard support; Esc clears the selection.
+This takes priority over cancellation while text is selected. Unsupported terminal
+clipboards can use native selection instead.
+
+Alt+y, F3, or `/copy` freezes the displayed entries and disables application mouse reporting so the
 terminal can select text by dragging. Copy with the terminal's shortcut (usually
 Ctrl+Shift+C on Linux or Cmd+C on macOS). F3 or Esc resumes live output; agent work
 continues while the snapshot is displayed. In many terminals Shift+drag also
-bypasses mouse reporting. F1 includes these instructions.
+bypasses mouse reporting. Alt+d or `/details` opens the latest trace without F2.
+F1 or `/help` includes these instructions.
 
-The footer shows context as `[used / capacity]` with a percentage; `~` marks an estimate until prompt usage arrives from the server. Reviews have separate context windows. Narrow terminals prioritize token counts over model metadata and shortcuts.
+The footer labels input context as `Input [used / capacity]` with a percentage.
+`Gen` is generated tokens for the current/latest request, including thinking,
+answer text, and tool calls. `~` marks character-based estimates until server
+usage arrives. Tool argument deltas are cumulative and are not double-counted.
+Reported thinking tokens are a subset of completion tokens, not an extra total.
+Reviews have separate input and output counters. Narrow terminals prioritize
+input token counts; `/status` shows full counters and the output limit.
 
 ## Output ownership and backpressure
 
 Input editing pauses during a turn, but the transcript and popup remain interactive. Model tool-argument deltas are display-only; execution still waits for validated complete arguments. Shell output streams within the existing capture limit; structured file tools return their result at completion. Streaming does not change tool execution, cancellation, or storage semantics.
 
-Traces are retained in memory for the current chat. Reasoning is not part of the persisted model conversation and is not restored on resume. Batch commands retain the Rich renderer; `--plain` and redirected output remain append-only. No UI performance guarantees have been measured.
+Trace popups are retained in memory for the current chat and are not restored on
+resume. Completed reasoning traces are saved with assistant messages in SQLite,
+including final responses and tool-call responses. By default, reasoning fields are removed
+from every inference request and excluded from the prompt context guard. With
+`local-model.return_reasoning: true`, they are included in request history, the
+input estimate, and the prompt context guard. Generation counts include thinking
+in either mode. Parent
+and reviewer sessions save their own traces. Partial interrupted generations are
+not persisted. Batch commands retain the Rich renderer; `--plain` and redirected
+output remain append-only. No UI performance guarantees have been measured.
 
 ## Initial checks
 

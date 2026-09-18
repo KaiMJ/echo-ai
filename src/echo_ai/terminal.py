@@ -1,6 +1,7 @@
 """Persistent interactive transcript; Rich formats Markdown, prompt_toolkit owns the screen."""
 
 import asyncio
+import base64
 import json
 import re
 import time
@@ -26,7 +27,8 @@ from prompt_toolkit.layout import (
     Window,
 )
 from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
-from prompt_toolkit.mouse_events import MouseEventType
+from prompt_toolkit.layout.utils import explode_text_fragments
+from prompt_toolkit.mouse_events import MouseButton, MouseEventType
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import Frame, TextArea
 from rich.console import Console
@@ -46,7 +48,7 @@ def fit_text(value, width):
 
 def key_highlights(value, width):
     text = fit_text(value, width)
-    keys = r"(Ctrl\+Shift\+C|Ctrl-End|Ctrl-C|Alt\+Enter|PgUp/PgDn|Enter|Esc|F[123])"
+    keys = r"(Ctrl\+Shift\+C|Ctrl-End|Ctrl-C|Alt\+Enter|Alt\+[dy]|PgUp/PgDn|Enter|Esc|F[123])"
     return [
         ("class:key" if re.fullmatch(keys, part) else "class:muted", part)
         for part in re.split(keys, text)
@@ -125,6 +127,50 @@ class TranscriptControl(UIControl):
         self.follow = True
         self.visible = []
         self.total = self.height = 0
+        self.rows = []
+        self.selection_rows = None
+        self.anchor = self.selection_end = None
+        self.dragging = False
+        self.selection_follow = True
+
+    def clear_selection(self):
+        if self.selection_rows is not None:
+            self.follow = self.selection_follow
+        self.selection_rows = None
+        self.anchor = self.selection_end = None
+        self.dragging = False
+
+    def selected_text(self):
+        if self.anchor is None or self.anchor == self.selection_end:
+            return ""
+        start, end = sorted((self.anchor, self.selection_end))
+        lines = []
+        for index in range(start[0], end[0] + 1):
+            text = "".join(part[1] for part in self.selection_rows[index][0])
+            left = start[1] if index == start[0] else 0
+            right = end[1] if index == end[0] else len(text)
+            selected = text[left:right]
+            # Rich pads rendered rows to the viewport; omit that padding when copying.
+            lines.append(selected.rstrip() if index < end[0] else selected)
+        return "\n".join(lines)
+
+    def selected_line(self, i):
+        fragments = self.visible[i][0]
+        if self.anchor is None:
+            return fragments
+        start, end = sorted((self.anchor, self.selection_end))
+        row = self.offset + i
+        if not start[0] <= row <= end[0]:
+            return fragments
+        return [
+            (
+                style + " class:selection"
+                if (row > start[0] or x >= start[1]) and (row < end[0] or x < end[1])
+                else style,
+                char,
+            )
+            for x, (style, char, *_) in enumerate(explode_text_fragments(fragments))
+        ]
 
     def is_focusable(self):
         return True
@@ -185,12 +231,15 @@ class TranscriptControl(UIControl):
                     lines = lines[-6:]
                 rows.extend((line, None) for line in lines)
             rows.append(([("", "")], None))
+        if self.selection_rows is not None:
+            rows = self.selection_rows
+        self.rows = rows
         self.total, self.height = len(rows), height
         maximum = max(0, len(rows) - height)
         self.offset = maximum if self.follow else min(self.offset, maximum)
         self.visible = rows[self.offset : self.offset + height]
         return UIContent(
-            get_line=lambda i: self.visible[i][0],
+            get_line=self.selected_line,
             line_count=len(self.visible),
             show_cursor=False,
         )
@@ -200,7 +249,29 @@ class TranscriptControl(UIControl):
             self.scroll(-3)
         elif event.event_type == MouseEventType.SCROLL_DOWN:
             self.scroll(3)
-        elif event.event_type == MouseEventType.MOUSE_UP:
+        elif event.button == MouseButton.LEFT and event.event_type == MouseEventType.MOUSE_DOWN:
+            if not self.visible:
+                return
+            self.clear_selection()
+            self.selection_rows = self.rows
+            self.selection_follow = self.follow
+            self.follow = False
+            row = self.offset + min(max(event.position.y, 0), len(self.visible) - 1)
+            self.anchor = self.selection_end = (row, max(0, event.position.x))
+            self.dragging = True
+        elif event.event_type in {MouseEventType.MOUSE_MOVE, MouseEventType.MOUSE_UP}:
+            if self.dragging:
+                row = self.offset + min(max(event.position.y, 0), len(self.visible) - 1)
+                self.selection_end = (row, max(0, event.position.x))
+                self.chat.app.invalidate()
+                if event.event_type == MouseEventType.MOUSE_MOVE:
+                    return
+                self.dragging = False
+                if self.anchor != self.selection_end:
+                    return
+                self.clear_selection()
+            if event.event_type != MouseEventType.MOUSE_UP:
+                return NotImplemented
             if 0 <= event.position.y < len(self.visible):
                 entry = self.visible[event.position.y][1]
                 if entry:
@@ -232,7 +303,7 @@ class TerminalChat:
             multiline=True,
             height=3,
             history=FileHistory(str(root / "input-history")),
-            completer=WordCompleter(["/help", "/diff", "/status", "/exit"]),
+            completer=WordCompleter(["/help", "/diff", "/status", "/details", "/copy", "/exit"]),
             read_only=Condition(lambda: self.busy or self.copy_mode),
             style="class:composer",
         )
@@ -258,25 +329,28 @@ class TerminalChat:
 
         @keys.add("escape")
         def close(event):
-            if self.copy_mode:
+            control = self.details if self.selected else self.transcript
+            if control.selection_rows is not None:
+                control.clear_selection()
+            elif self.copy_mode:
                 self.toggle_copy()
             else:
                 self.close_details()
 
         @keys.add("f2")
+        @keys.add("escape", "d")
         def latest(event):
             if self.selected:
                 self.close_details()
             else:
-                entry = next((e for e in reversed(self.entries) if e.expandable), None)
-                if entry:
-                    self.open_details(entry)
+                self.latest_details()
 
         @keys.add("f1")
         def help_view(event):
             self.open_details(self.help_entry())
 
         @keys.add("f3")
+        @keys.add("escape", "y")
         def selection_mode(event):
             self.toggle_copy()
 
@@ -293,10 +367,13 @@ class TerminalChat:
         @keys.add("c-end")
         def follow(event):
             control = self.details if self.selected else self.transcript
+            control.clear_selection()
             control.follow = True
 
         @keys.add("c-c")
         def cancel(event):
+            if self.copy_selection():
+                return
             if self.selected:
                 self.close_details()
             elif self.busy:
@@ -342,7 +419,7 @@ class TerminalChat:
             mouse_support=Condition(lambda: not self.copy_mode),
             input=input,
             output=output,
-            min_redraw_interval=0.1,
+            min_redraw_interval=0.016,
             refresh_interval=0.125,
             style=Style.from_dict(
                 {
@@ -354,6 +431,7 @@ class TerminalChat:
                     "spinner": "ansimagenta bold",
                     "success": "ansigreen",
                     "key": "ansicyan bold",
+                    "selection": "reverse",
                     "composer": "",
                     "frame.border": "ansibrightblack",
                     "frame.label": "bold",
@@ -379,6 +457,8 @@ class TerminalChat:
         return "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(moment * 8) % 10]
 
     def toggle_copy(self):
+        self.transcript.clear_selection()
+        self.details.clear_selection()
         if not self.copy_mode:
             self.copy_status = self.status()
             self.copy_time = time.monotonic()
@@ -389,6 +469,21 @@ class TerminalChat:
             self.copy_selected = None
         self.copy_mode = not self.copy_mode
         self.app.invalidate()
+
+    def copy_selection(self):
+        control = self.details if self.selected else self.transcript
+        text = control.selected_text()
+        if not text:
+            return False
+        # OSC 52 targets the user's terminal clipboard, including over SSH.
+        payload = base64.b64encode(text.encode()).decode("ascii")
+        self.app.output.write_raw(f"\x1b]52;c;{payload}\x07")
+        self.app.output.flush()
+        return True
+
+    def latest_details(self):
+        entry = next((e for e in reversed(self.entries) if e.expandable), None)
+        self.open_details(entry or Entry("notice", "Details", "No tool or reasoning traces yet."))
 
     def header(self):
         width = self.app.output.get_size().columns
@@ -405,27 +500,29 @@ class TerminalChat:
     def composer_hint(self):
         width = self.app.output.get_size().columns
         if self.copy_mode:
-            hint = "F3 resume · Select text · Ctrl+Shift+C copy"
+            hint = "Esc resume · Select text · Ctrl+Shift+C copy"
+        elif (self.details if self.selected else self.transcript).selected_text():
+            hint = "Ctrl-C copy selection · Esc clear · Alt+y native copy"
         elif self.selected:
-            hint = "Esc close · F3 select/copy · PgUp/PgDn scroll"
+            hint = "Esc close · Alt+y native copy · PgUp/PgDn scroll"
         elif not self.transcript.follow:
             hint = "History · Ctrl-End follows latest output"
         elif self.busy:
-            hint = "Working · Ctrl-C cancel · F2 details · F3 select/copy"
+            hint = "Working · Ctrl-C cancel · Alt+d details · Alt+y copy"
         elif width < 40:
-            hint = "Enter send · F3 copy"
+            hint = "Enter send · /copy"
         elif width < 65:
-            hint = "Enter send · F3 copy · F1 help"
+            hint = "Enter send · /copy · /help"
         else:
-            hint = "Enter send · Alt+Enter newline · F2 details · F3 copy · F1 help"
+            hint = "Enter send · Alt+Enter newline · Alt+d details · Alt+y copy · F1 help"
         return key_highlights(f" ── {hint} ", width)
 
     def details_title(self):
         width = max(1, self.app.output.get_size().columns - 10)
         title = (
-            "F3 resume · Select text · Ctrl+Shift+C copy"
+            "Esc resume · Select text · Ctrl+Shift+C copy"
             if self.copy_mode
-            else "Trace details · F3 select/copy · Esc close"
+            else "Trace details · Ctrl-C copy selection · Alt+y native copy · Esc close"
         )
         return key_highlights(title, width)
 
@@ -434,16 +531,20 @@ class TerminalChat:
             "notice",
             "Help · Esc close",
             "**Write**  Enter sends; Alt+Enter adds a line.\n\n"
-            "**Inspect**  Click a reasoning or tool row, or press F2 for the latest trace. "
+            "**Inspect**  Click a reasoning or tool row, or use Alt+d, F2, or /details. "
             "Esc closes details.\n\n"
             "**Navigate**  Mouse wheel or PgUp/PgDn scrolls; Ctrl-End follows new output.\n\n"
-            "**Copy**  F3 freezes the view and releases the mouse to your terminal. "
+            "**Select**  Drag across the transcript or details to highlight text. Ctrl-C "
+            "requests copying through your terminal's OSC 52 clipboard support. "
+            "Esc clears the selection.\n\n"
+            "**Native copy**  If clipboard copying is unsupported, use /copy, Alt+y, or F3. "
+            "This freezes the view and releases the mouse to your terminal. "
             "Drag to select, then use your terminal's copy shortcut (usually Ctrl+Shift+C "
             "on Linux or Cmd+C on macOS). F3 or Esc resumes live updates. "
             "In many terminals, Shift+drag also selects without entering copy mode.\n\n"
             "**Stop**  Ctrl-C cancels a running turn or clears the prompt. "
             "Ctrl-D exits when idle.\n\n"
-            "**Commands**  /help · /diff · /status · /exit",
+            "**Commands**  /help · /diff · /status · /details · /copy · /exit",
         )
 
     def add(self, kind, title, text="", **kwargs):
@@ -452,6 +553,8 @@ class TerminalChat:
         return entry
 
     def open_details(self, entry):
+        self.transcript.clear_selection()
+        self.details.clear_selection()
         if self.copy_mode:
             self.toggle_copy()
         self.selected = entry
@@ -461,6 +564,7 @@ class TerminalChat:
         self.app.invalidate()
 
     def close_details(self):
+        self.details.clear_selection()
         if self.copy_mode:
             self.toggle_copy()
         self.selected = None
@@ -547,6 +651,7 @@ class TerminalChat:
         self.app.invalidate()
 
     async def submit(self, text):
+        self.transcript.clear_selection()
         self.transcript.follow = True
         if text == "/exit":
             self.app.exit()
@@ -554,13 +659,29 @@ class TerminalChat:
         if text == "/help":
             self.open_details(self.help_entry())
             return
+        if text == "/details":
+            self.latest_details()
+            return
+        if text == "/copy":
+            self.toggle_copy()
+            return
         if text == "/status":
+            reasoning_policy = (
+                "Input includes saved reasoning traces sent back to the model. "
+                if self.renderer.active.return_reasoning
+                else "Input excludes saved reasoning traces; they are not sent back to the model. "
+            )
             self.add(
                 "notice",
                 "Status",
                 f"Session: {self.agent.session_id}\n\n"
                 f"Workspace: {self.agent.sandbox.workspace}\n\n"
-                f"{self.renderer.active_context_text()}",
+                f"{self.renderer.active_context_text()}\n\n"
+                f"{self.renderer.active.generated_text(detailed=True)}\n\n"
+                f"Input counts the latest request. {reasoning_policy}"
+                "Gen counts generated thinking, answer, and tool-call tokens for that request. "
+                "~ marks a character-based estimate until server usage arrives. "
+                "Completed reasoning traces are saved locally in either mode.",
             )
             return
         if text == "/diff":
