@@ -2,8 +2,11 @@
 
 import asyncio
 import json
-from dataclasses import dataclass, field
+import re
+import time
+from dataclasses import dataclass, field, replace
 from io import StringIO
+from pathlib import PurePath
 
 import httpx
 from prompt_toolkit import Application
@@ -19,16 +22,36 @@ from prompt_toolkit.layout import (
     FloatContainer,
     HSplit,
     Layout,
+    VSplit,
     Window,
 )
-from prompt_toolkit.layout.controls import UIContent, UIControl
+from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
 from prompt_toolkit.mouse_events import MouseEventType
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import Frame, TextArea
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.syntax import Syntax
+from rich.text import Text
 
 from .ui import safe_text
+
+
+def fit_text(value, width):
+    """Clip chrome by terminal cells, including wide Unicode characters."""
+    text = Text(safe_text(value).replace("\n", " ").replace("\t", " "))
+    text.truncate(max(0, width), overflow="ellipsis")
+    return text.plain
+
+
+def key_highlights(value, width):
+    text = fit_text(value, width)
+    keys = r"(Ctrl\+Shift\+C|Ctrl-End|Ctrl-C|Alt\+Enter|PgUp/PgDn|Enter|Esc|F[123])"
+    return [
+        ("class:key" if re.fullmatch(keys, part) else "class:muted", part)
+        for part in re.split(keys, text)
+        if part
+    ]
 
 
 @dataclass
@@ -39,6 +62,8 @@ class Entry:
     detail: str = ""
     done: bool = False
     status: str = ""
+    tool: str = ""
+    path: str = ""
     cache_key: tuple | None = None
     cache: list = field(default_factory=list)
 
@@ -48,7 +73,7 @@ class Entry:
 
     def markdown_lines(self, width):
         source = self.detail + self.text
-        key = (width, source)
+        key = (width, source, self.tool, self.path)
         if key != self.cache_key:
             output = StringIO()
             console = Console(
@@ -58,7 +83,32 @@ class Entry:
                 color_system="standard",
                 highlight=False,
             )
-            console.print(Markdown(source or "Waiting for output…"))
+            if self.kind == "tool":
+                if self.detail:
+                    console.print(Text("Arguments", style="dim"))
+                    console.print(
+                        Syntax(self.detail, "json", word_wrap=True, background_color="default")
+                    )
+                    console.print()
+                console.print(Text("Output", style="dim"))
+                body = self.text or ("No output." if self.done else "Waiting for output…")
+                if self.tool == "read" and not self.status.startswith("Failed"):
+                    # Read results prefix each source line with its original line number.
+                    body = re.sub(r"(?m)^\d+: ", "", body)
+                    if PurePath(self.path).suffix.lower() in {".md", ".markdown", ".mdown"}:
+                        console.print(Markdown(body))
+                    else:
+                        lexer = Syntax.guess_lexer(self.path, body)
+                        console.print(
+                            Syntax(body, lexer, word_wrap=True, background_color="default")
+                        )
+                elif self.tool == "delegate":
+                    console.print(Markdown(body))
+                else:
+                    # Shell output, filenames, and search matches are literal text.
+                    console.print(Text(body))
+            else:
+                console.print(Markdown(source or "Waiting for output…"))
             self.cache = list(split_lines(to_formatted_text(ANSI(output.getvalue()))))
             # Rich appends a newline; don't accumulate empty rows between entries.
             while self.cache and not any(fragment[1] for fragment in self.cache[-1]):
@@ -86,17 +136,49 @@ class TranscriptControl(UIControl):
 
     def create_content(self, width, height):
         rows = []
-        entries = [self.chat.selected] if self.popup else self.chat.entries
+        if self.chat.copy_mode:
+            entries = [self.chat.copy_selected] if self.popup else self.chat.copy_entries
+        else:
+            entries = [self.chat.selected] if self.popup else self.chat.entries
+        if not self.popup and not entries:
+            for style, text in (
+                ("class:heading", "What would you like to work on?"),
+                ("class:muted", "Describe a change, investigate a bug, or ask about the code."),
+                ("class:muted", "/help for commands · /diff to inspect changes"),
+            ):
+                rows.append(([(style, fit_text(text, width))], None))
+            rows = rows[:height]
         for entry in entries:
             if entry is None:
                 continue
-            if self.popup:
-                title = f"{entry.title} · {entry.status}   [Close · Esc]"
-            else:
-                title = entry.title
-                if entry.expandable:
-                    title += f" · {entry.status or 'Streaming'} · [Open details]"
-            rows.append(([("bold ansicyan", title)], entry if entry.expandable else None))
+            style = "class:heading" if entry.kind == "text" else "class:muted"
+            if entry.kind == "user":
+                style = "class:accent"
+            if entry.title == "Error" or entry.status.startswith("Failed"):
+                style = "class:error"
+            elif entry.status in {"Cancelled", "Interrupted"}:
+                style = "class:warning"
+            suffix = ""
+            if entry.expandable:
+                suffix = f" · {entry.status or 'Streaming'}"
+                if width >= 60:
+                    suffix += " · Esc close" if self.popup else " · details"
+            suffix_width = Text(suffix).cell_len
+            icon = []
+            if entry.expandable:
+                if not entry.done:
+                    icon = [("class:spinner", self.chat.spinner() + " ")]
+                elif entry.status.startswith("Failed"):
+                    icon = [("class:error", "✗ ")]
+                elif entry.status in {"Cancelled", "Interrupted"}:
+                    icon = [("class:warning", "! ")]
+                else:
+                    icon = [("class:success", "✓ ")]
+            available = max(0, width - (2 if icon else 0))
+            title = fit_text(entry.title, max(0, available - suffix_width)) + suffix
+            rows.append(
+                (icon + [(style, fit_text(title, available))], entry if entry.expandable else None)
+            )
             if self.popup or not entry.expandable or not entry.done:
                 lines = entry.markdown_lines(max(1, width - 1))
                 if entry.expandable and not self.popup:
@@ -138,6 +220,11 @@ class TerminalChat:
         self.drafts = {}
         self.selected = None
         self.task = None
+        self.copy_mode = False
+        self.copy_entries = []
+        self.copy_selected = None
+        self.copy_time = 0.0
+        self.copy_status = ""
         self.transcript = TranscriptControl(self)
         self.details = TranscriptControl(self, popup=True)
         self.editor = TextArea(
@@ -146,13 +233,16 @@ class TerminalChat:
             height=3,
             history=FileHistory(str(root / "input-history")),
             completer=WordCompleter(["/help", "/diff", "/status", "/exit"]),
-            read_only=Condition(lambda: self.busy),
+            read_only=Condition(lambda: self.busy or self.copy_mode),
+            style="class:composer",
         )
         keys = KeyBindings()
 
         @keys.add("enter")
         def submit(event):
-            if self.selected:
+            if self.copy_mode:
+                self.toggle_copy()
+            elif self.selected:
                 self.close_details()
             elif not self.busy:
                 text = self.editor.text.strip()
@@ -163,12 +253,15 @@ class TerminalChat:
 
         @keys.add("escape", "enter")
         def newline(event):
-            if not self.busy and not self.selected:
+            if not self.busy and not self.selected and not self.copy_mode:
                 self.editor.buffer.insert_text("\n")
 
         @keys.add("escape")
         def close(event):
-            self.close_details()
+            if self.copy_mode:
+                self.toggle_copy()
+            else:
+                self.close_details()
 
         @keys.add("f2")
         def latest(event):
@@ -178,6 +271,14 @@ class TerminalChat:
                 entry = next((e for e in reversed(self.entries) if e.expandable), None)
                 if entry:
                     self.open_details(entry)
+
+        @keys.add("f1")
+        def help_view(event):
+            self.open_details(self.help_entry())
+
+        @keys.add("f3")
+        def selection_mode(event):
+            self.toggle_copy()
 
         @keys.add("pageup")
         def page_up(event):
@@ -210,25 +311,25 @@ class TerminalChat:
             else:
                 self.app.exit()
 
-        from prompt_toolkit.layout.controls import FormattedTextControl
-
-        status = Window(FormattedTextControl(self.status), height=1, style="reverse")
+        status = Window(FormattedTextControl(self.status), height=1, style="class:muted")
         body = HSplit(
             [
                 Window(
-                    FormattedTextControl(
-                        "Echo · Click traces for details · F2 latest · PgUp/PgDn scroll · Ctrl-End follow"
-                    ),
+                    FormattedTextControl(self.header),
                     height=1,
-                    style="dim",
                 ),
-                Window(self.transcript),
-                self.editor,
+                VSplit([Window(width=2), Window(self.transcript), Window(width=2)]),
+                Window(
+                    FormattedTextControl(self.composer_hint),
+                    height=1,
+                    style="class:muted",
+                ),
+                VSplit([Window(width=2), self.editor, Window(width=2)]),
                 status,
             ]
         )
         popup = ConditionalContainer(
-            Frame(Window(self.details), title="Trace details"),
+            Frame(Window(self.details), title=self.details_title),
             filter=Condition(lambda: self.selected is not None),
         )
         layout = FloatContainer(
@@ -238,21 +339,112 @@ class TerminalChat:
             layout=Layout(layout, focused_element=self.editor),
             key_bindings=keys,
             full_screen=True,
-            mouse_support=True,
+            mouse_support=Condition(lambda: not self.copy_mode),
             input=input,
             output=output,
             min_redraw_interval=0.1,
-            refresh_interval=0.25,
-            style=Style.from_dict({"dim": "ansibrightblack"}),
+            refresh_interval=0.125,
+            style=Style.from_dict(
+                {
+                    "heading": "bold",
+                    "accent": "ansicyan bold",
+                    "muted": "ansibrightblack",
+                    "error": "ansired bold",
+                    "warning": "ansiyellow",
+                    "spinner": "ansimagenta bold",
+                    "success": "ansigreen",
+                    "key": "ansicyan bold",
+                    "composer": "",
+                    "frame.border": "ansibrightblack",
+                    "frame.label": "bold",
+                }
+            ),
         )
+        # Resolve standalone Esc promptly while leaving time for Alt+Enter sequences.
+        self.app.ttimeoutlen = 0.1
+        self.app.timeoutlen = 0.5
 
     @property
     def busy(self):
         return self.task is not None and not self.task.done()
 
     def status(self):
+        if self.copy_mode:
+            return self.copy_status
         self.renderer.console.width = self.app.output.get_size().columns
         return self.renderer.toolbar(streaming=self.busy)
+
+    def spinner(self):
+        moment = self.copy_time if self.copy_mode else time.monotonic()
+        return "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(moment * 8) % 10]
+
+    def toggle_copy(self):
+        if not self.copy_mode:
+            self.copy_status = self.status()
+            self.copy_time = time.monotonic()
+            self.copy_entries = [replace(entry) for entry in self.entries]
+            self.copy_selected = replace(self.selected) if self.selected else None
+        else:
+            self.copy_entries = []
+            self.copy_selected = None
+        self.copy_mode = not self.copy_mode
+        self.app.invalidate()
+
+    def header(self):
+        width = self.app.output.get_size().columns
+        session = safe_text(self.agent.session_id)[:8]
+        metadata = f"  /  {self.renderer.model}" if self.renderer.model else ""
+        metadata += f"  /  {session}"
+        icon = self.spinner() if self.busy and not self.copy_mode else "✦"
+        return [
+            ("class:spinner", f" {icon}"),
+            ("class:accent", " Echo"),
+            ("class:muted", fit_text(metadata, width - 7)),
+        ]
+
+    def composer_hint(self):
+        width = self.app.output.get_size().columns
+        if self.copy_mode:
+            hint = "F3 resume · Select text · Ctrl+Shift+C copy"
+        elif self.selected:
+            hint = "Esc close · F3 select/copy · PgUp/PgDn scroll"
+        elif not self.transcript.follow:
+            hint = "History · Ctrl-End follows latest output"
+        elif self.busy:
+            hint = "Working · Ctrl-C cancel · F2 details · F3 select/copy"
+        elif width < 40:
+            hint = "Enter send · F3 copy"
+        elif width < 65:
+            hint = "Enter send · F3 copy · F1 help"
+        else:
+            hint = "Enter send · Alt+Enter newline · F2 details · F3 copy · F1 help"
+        return key_highlights(f" ── {hint} ", width)
+
+    def details_title(self):
+        width = max(1, self.app.output.get_size().columns - 10)
+        title = (
+            "F3 resume · Select text · Ctrl+Shift+C copy"
+            if self.copy_mode
+            else "Trace details · F3 select/copy · Esc close"
+        )
+        return key_highlights(title, width)
+
+    def help_entry(self):
+        return Entry(
+            "notice",
+            "Help · Esc close",
+            "**Write**  Enter sends; Alt+Enter adds a line.\n\n"
+            "**Inspect**  Click a reasoning or tool row, or press F2 for the latest trace. "
+            "Esc closes details.\n\n"
+            "**Navigate**  Mouse wheel or PgUp/PgDn scrolls; Ctrl-End follows new output.\n\n"
+            "**Copy**  F3 freezes the view and releases the mouse to your terminal. "
+            "Drag to select, then use your terminal's copy shortcut (usually Ctrl+Shift+C "
+            "on Linux or Cmd+C on macOS). F3 or Esc resumes live updates. "
+            "In many terminals, Shift+drag also selects without entering copy mode.\n\n"
+            "**Stop**  Ctrl-C cancels a running turn or clears the prompt. "
+            "Ctrl-D exits when idle.\n\n"
+            "**Commands**  /help · /diff · /status · /exit",
+        )
 
     def add(self, kind, title, text="", **kwargs):
         entry = Entry(kind, safe_text(title), safe_text(text), **kwargs)
@@ -260,6 +452,8 @@ class TerminalChat:
         return entry
 
     def open_details(self, entry):
+        if self.copy_mode:
+            self.toggle_copy()
         self.selected = entry
         self.details.offset = 0
         self.details.follow = False
@@ -267,6 +461,8 @@ class TerminalChat:
         self.app.invalidate()
 
     def close_details(self):
+        if self.copy_mode:
+            self.toggle_copy()
         self.selected = None
         self.app.layout.focus(self.editor)
         self.app.invalidate()
@@ -292,7 +488,8 @@ class TerminalChat:
                 entry = self.add("tool", f"{actor} · Tool", status="Preparing")
                 self.drafts[key] = entry
             entry.title = f"{actor} · {safe_text(value['name']) or 'Tool'}"
-            entry.detail = "```json\n" + safe_text(value["arguments"]) + "\n```\n\n"
+            entry.tool = safe_text(value["name"])
+            entry.detail = safe_text(value["arguments"])
         elif kind == "tool_start":
             entry = next(
                 (
@@ -305,19 +502,20 @@ class TerminalChat:
             if entry is None:
                 entry = self.add("tool", f"{actor} · {safe_text(value)}")
             entry.status = "Running"
+            entry.tool = safe_text(value)
             self.current[(actor, "tool")] = entry
         elif kind in {"tool_detail", "tool_output", "tool_end"}:
             entry = self.current.get((actor, "tool"))
             if entry:
                 if kind == "tool_detail":
                     args = value["args"]
+                    entry.tool = safe_text(value["name"])
+                    entry.path = safe_text(args.get("path", ""))
                     summary = args.get("command") or args.get("path") or args.get("pattern")
                     entry.title = f"{actor} · {safe_text(value['name'])}"
                     if summary:
                         entry.title += " · " + safe_text(summary).replace("\n", " ")[:80]
-                    entry.detail = (
-                        "```json\n" + safe_text(json.dumps(value["args"], indent=2)) + "\n```\n\n"
-                    )
+                    entry.detail = safe_text(json.dumps(value["args"], indent=2))
                 elif kind == "tool_output":
                     entry.text += safe_text(value)
                 else:
@@ -354,14 +552,7 @@ class TerminalChat:
             self.app.exit()
             return
         if text == "/help":
-            self.add(
-                "notice",
-                "Help",
-                "Enter sends; Alt+Enter adds a line. Ctrl-C cancels. "
-                "Click a reasoning or tool row to open its Markdown trace; Esc closes it. "
-                "F2 opens the latest trace. Scroll with the mouse or PgUp/PgDn; "
-                "Ctrl-End follows new output. /diff · /status · /exit",
-            )
+            self.open_details(self.help_entry())
             return
         if text == "/status":
             self.add(
@@ -375,7 +566,11 @@ class TerminalChat:
         if text == "/diff":
             try:
                 patch = await asyncio.to_thread(self.agent.sandbox.diff)
-                self.add("notice", "Changes", "```diff\n" + patch + "\n```")
+                self.add(
+                    "notice",
+                    "Changes",
+                    "```diff\n" + patch + "\n```" if patch.strip() else "No sandbox changes yet.",
+                )
             except (RuntimeError, ValueError, OSError) as error:
                 self.add("notice", "Error", str(error))
             return

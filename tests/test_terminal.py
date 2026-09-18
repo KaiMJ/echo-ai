@@ -102,6 +102,75 @@ def test_scrolling_back_does_not_follow_new_output(chat):
     assert "Newest line" in "\n".join(lines(chat.transcript, height=10))
 
 
+@pytest.mark.parametrize(
+    "tool,path,output,expected",
+    [
+        (
+            "read",
+            "README.md",
+            "1: ## Welcome\n2: \n3: **Hello** world\n",
+            ["Welcome", "Hello world"],
+        ),
+        ("list", ".", "__init__.py\n*literal*.md\nsrc/", ["__init__.py", "*literal*.md", "src/"]),
+        (
+            "bash",
+            "",
+            "# literal heading\nline one\nline two",
+            ["# literal heading", "line one", "line two"],
+        ),
+        ("read", "app.py", "7: def main():\n8:     return 42\n", ["def main():", "    return 42"]),
+    ],
+)
+def test_tool_details_preserve_content_structure(chat, tool, path, output, expected):
+    chat.renderer.emit("tool_start", tool)
+    chat.renderer.emit("tool_detail", {"name": tool, "args": {"path": path}})
+    chat.renderer.emit("tool_end", {"output": output})
+    chat.open_details(chat.entries[-1])
+    rendered = lines(chat.details)
+    for text in expected:
+        assert any(text in line for line in rendered)
+    if path.endswith(".md"):
+        assert "**Hello**" not in "\n".join(rendered)
+        assert "3: " not in "\n".join(rendered)
+
+
+def test_copy_mode_releases_mouse_and_freezes_output_until_resumed(chat):
+    chat.renderer.emit("text", "Original answer")
+    chat.toggle_copy()
+    before = lines(chat.transcript)
+    assert not chat.app.mouse_support()
+    assert chat.editor.read_only()
+    chat.renderer.emit("text", "\n\nNew output")
+    assert lines(chat.transcript) == before
+    chat.toggle_copy()
+    assert chat.app.mouse_support()
+    assert not chat.editor.read_only()
+    assert "New output" in "\n".join(lines(chat.transcript))
+
+
+def test_copy_mode_keeps_open_tool_stable_during_completion(chat):
+    chat.renderer.emit("tool_start", "bash")
+    chat.renderer.emit("tool_output", "Still running")
+    chat.open_details(chat.entries[-1])
+    chat.toggle_copy()
+    before = lines(chat.details)
+    chat.renderer.emit("tool_end", {"output": "Finished"})
+    assert lines(chat.details) == before
+    chat.toggle_copy()
+    assert "Finished" in "\n".join(lines(chat.details))
+
+
+def test_spinner_animates_and_stops_on_completion(chat, monkeypatch):
+    monkeypatch.setattr("echo_ai.terminal.time.monotonic", lambda: 1.0)
+    chat.renderer.emit("tool_start", "list")
+    before = lines(chat.transcript)[0]
+    monkeypatch.setattr("echo_ai.terminal.time.monotonic", lambda: 1.2)
+    assert lines(chat.transcript)[0] != before
+    chat.renderer.emit("tool_end", {"output": "file.md"})
+    assert lines(chat.transcript)[0].startswith("✓ ")
+    assert any(style == "class:key" and text == "F3" for style, text in chat.composer_hint())
+
+
 def test_pty_mouse_popup_multiline_and_exit(tmp_path):
     import sys
 
@@ -137,6 +206,10 @@ asyncio.run(chat(Agent(), Path(sys.argv[1])))
         process.send("\x1b[<0;5;5M\x1b[<0;5;5m")
         process.expect("Trace details")
         process.expect("Trace body only visible in popup")
+        process.send("\x1bOR")  # F3 releases terminal mouse reporting for native selection.
+        process.expect_exact("\x1b[?1000l")
+        process.send("\x1bOR")
+        process.expect_exact("\x1b[?1000h")
         process.send("\x1b")
         process.sendcontrol("l")
         process.expect("Answer ready")
