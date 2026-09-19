@@ -1,6 +1,6 @@
 # Echo
 
-A small local coding agent for Linux. Gemma runs on vLLM; coding tools edit your checkout directly by default. Use `--sandbox` to work in a disposable Docker copy instead.
+A small local coding agent for Linux. Qwen or Gemma runs on vLLM, with the LiteLLM SDK inside Echo; coding tools edit your checkout directly by default. Use `--sandbox` to work in a disposable Docker copy instead.
 
 ## Features
 
@@ -13,7 +13,7 @@ A small local coding agent for Linux. Gemma runs on vLLM; coding tools edit your
 ## Quick Start
 
 ### 1. Setup
-Requires Python 3.12+, [uv](https://docs.astral.sh/uv/), Git, Bash, and ripgrep. Docker is needed only for `--sandbox`.
+Requires Python 3.12+, [uv](https://docs.astral.sh/uv/), Git, Bash, and ripgrep. Docker with NVIDIA GPU support is needed for local inference; Docker also runs `--sandbox`.
 
 ```bash
 # Sync dependencies
@@ -26,6 +26,8 @@ docker build -t echo-ai-sandbox:local .
 cp .env.example .env
 uv run echo-ai config
 ```
+
+See [deployment and model profiles](models/README.md) to start or switch the GPU backend.
 
 ### 2. Usage
 
@@ -63,18 +65,15 @@ With `--sandbox`:
 
 ## Configuration
 
+Choose `model-profile: models/qwen.yaml` or `models/gemma.yaml` in `echo.yaml`.
+Model request and deployment settings live in that profile; agent, tool and UI settings stay in
+`echo.yaml`. Environment variables override YAML. Resumed sessions keep their saved settings.
+
 ```bash
-# After editing echo.yaml
-uv run echo-ai # or
-uv sync --locked
-
-# after editing sandbox
-docker build -t echo-ai-sandbox:local .
-
-# after updating inference service
-docker compsoe up -d # or
-docker compose up -d --force-recreate
-
-# delete all sessions
-~/.local/share/echo-ai/ # ECHO_STATE_DIR
+uv run echo-ai config
+uv run python models/manage.py qwen up
+uv run echo-ai doctor
 ```
+
+See [deployment instructions](models/README.md) for cache paths, model switching,
+reasoning settings, live smoke tests, and adding external providers.

@@ -10,6 +10,11 @@ YAML_SECTIONS = {
     "local-model": {
         "base_url",
         "model",
+        "provider",
+        "api_key_env",
+        "request_format",
+        "reasoning_effort",
+        "preserve_thinking",
         "reasoning_enabled",
         "return_reasoning",
         "context_tokens",
@@ -67,16 +72,44 @@ def load_environment():
     load_dotenv(path, override=False)
 
 
+def read_model_profile(path):
+    """Read one model's request settings and optional local deployment settings."""
+    try:
+        model = yaml.safe_load(Path(path).read_text())
+    except (OSError, yaml.YAMLError) as error:
+        raise ValueError(f"Cannot load model profile {path}: {error}") from error
+    if not isinstance(model, dict):
+        raise ValueError(f"Model profile {path} must be a YAML mapping")  # noqa: TRY004
+    deployment = model.pop("deployment", {})
+    if not isinstance(deployment, dict):
+        raise ValueError("deployment must be a YAML mapping")  # noqa: TRY004
+    yaml_values({"local-model": model})
+    return model, deployment
+
+
 def read_document():
     path = Path(os.getenv("ECHO_CONFIG_FILE", "echo.yaml")).expanduser()
     if "ECHO_CONFIG_FILE" not in os.environ and not path.exists():
-        return {}
-    try:
-        document = yaml.safe_load(path.read_text())
-    except (OSError, yaml.YAMLError) as error:
-        raise ValueError(f"Cannot load configuration {path}: {error}") from error
+        document = {}
+    else:
+        try:
+            document = yaml.safe_load(path.read_text())
+        except (OSError, yaml.YAMLError) as error:
+            raise ValueError(f"Cannot load configuration {path}: {error}") from error
     if document is None:
-        return {}
+        document = {}
     if not isinstance(document, dict):
         raise ValueError("configuration must be a YAML mapping")  # noqa: TRY004
+    profile = os.getenv("ECHO_MODEL_PROFILE", document.pop("model-profile", ""))
+    if profile:
+        if not isinstance(profile, str):
+            raise ValueError("model-profile must be a path string")
+        profile_path = Path(profile).expanduser()
+        if not profile_path.is_absolute():
+            profile_path = path.parent / profile_path
+        model, _ = read_model_profile(profile_path)
+        overrides = document.get("local-model", {})
+        if not isinstance(overrides, dict):
+            raise ValueError("local-model must be a YAML mapping")
+        document["local-model"] = {**model, **overrides}
     return document

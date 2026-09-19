@@ -1,20 +1,9 @@
-# Runtime defaults for new sessions. ECHO_* environment variables override them.
-local-model:
-  # base_url defaults to localhost using ECHO_INFERENCE_PORT (8001 by default).
-  model: cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit
-  reasoning_enabled: true
-  return_reasoning: false # Send saved reasoning traces back to the model.
-  context_tokens: 262144
-  max_tokens: 16384
-  max_context_chars: null
-  timeout: 180
-  temperature: 1.0
-  top_p: 0.95
-  top_k: 64
+# Shared settings. ECHO_* environment variables override YAML.
+model-profile: models/qwen.yaml
 
 agent:
-  max_steps: 20
-  child_max_steps: 8
+  max_steps: 64
+  child_max_steps: 24
 
 sandbox:
   # Sizes are bytes; timeouts are seconds.

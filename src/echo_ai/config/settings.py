@@ -8,6 +8,11 @@ from dataclasses import dataclass, fields
 class RuntimeSettings:
     base_url: str = "http://127.0.0.1:8001/v1"
     model: str = "cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit"
+    provider: str = "hosted_vllm"
+    api_key_env: str = "ECHO_API_KEY"
+    request_format: str = "vllm"
+    reasoning_effort: str = ""
+    preserve_thinking: bool = False
     max_steps: int = 20
     max_tokens: int = 16384
     context_tokens: int = 262144
@@ -46,8 +51,19 @@ class RuntimeSettings:
                 valid = type(value) is expected
             if not valid:
                 raise ValueError(f"Invalid type for {field.name}")
-        if not self.base_url.strip() or not self.model.strip():
-            raise ValueError("base_url and model must not be empty")
+        if not self.model.strip() or not self.provider.strip():
+            raise ValueError("model and provider must not be empty")
+        if self.provider == "hosted_vllm" and not self.base_url.strip():
+            raise ValueError("base_url must not be empty for hosted_vllm")
+        if self.request_format not in {"vllm", "qwen", "standard"}:
+            raise ValueError("request_format must be vllm, qwen, or standard")
+        if self.request_format == "qwen" and self.reasoning_effort not in {
+            "",
+            "low",
+            "medium",
+            "xhigh",
+        }:
+            raise ValueError("Qwen reasoning_effort must be low, medium, or xhigh")
         for name in ("max_steps", "max_tokens", "context_tokens", "timeout"):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:

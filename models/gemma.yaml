@@ -1,0 +1,23 @@
+# One profile for Echo requests and local vLLM deployment.
+# context_tokens includes input + reasoning + final output.
+model: cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit
+reasoning_enabled: false
+return_reasoning: false
+context_tokens: 262144
+max_tokens: 65536
+max_context_chars: null
+timeout: 180
+temperature: 1.0
+top_p: 0.95
+top_k: 64
+provider: hosted_vllm
+request_format: vllm
+deployment:
+  revision: 3a7dcb639a4e7b230a0491ab4fa6fac081284d37
+  cache_env: ECHO_GEMMA_HUB_CACHE
+  tensor_parallel_size: 1
+  pipeline_parallel_size: 2
+  gpu_memory_utilization: 0.9
+  max_num_seqs: 1
+  tool_call_parser: gemma4
+  reasoning_parser: gemma4

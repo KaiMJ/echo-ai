@@ -1,5 +1,6 @@
+# Use: uv run python models/manage.py qwen up
+# Model command and cache mount are supplied from models/<name>.yaml.
 name: echo
-
 services:
   inference:
     image: vllm/vllm-openai@sha256:c2914767605584b6d8f45686b82de173ecc99e781897aa3d0a66dacd72c51ae1
@@ -7,45 +8,32 @@ services:
     gpus: all
     shm_size: 4gb
     ports:
-      - "127.0.0.1:${ECHO_INFERENCE_PORT:-8001}:8000"
-    volumes:
-      - "${ECHO_MODEL_CACHE:?Set ECHO_MODEL_CACHE to the model cache directory}:/model:ro"
-      - inference-cache:/root/.cache/vllm
+    - 127.0.0.1:${ECHO_INFERENCE_PORT:-8001}:8000
     environment:
-      HF_HUB_OFFLINE: "1"
-      HF_HUB_DISABLE_TELEMETRY: "1"
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
+      HF_HUB_OFFLINE: '1'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
     logging:
       driver: json-file
       options:
         max-size: 10m
-        max-file: "3"
-    command:
-      - /model/snapshots/${ECHO_MODEL_REVISION:-3a7dcb639a4e7b230a0491ab4fa6fac081284d37}
-      - --served-model-name
-      - gemma
-      - ${ECHO_MODEL:-cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit}
-      - --pipeline-parallel-size
-      - "${ECHO_PIPELINE_PARALLEL_SIZE:-2}"
-      - --tensor-parallel-size
-      - "${ECHO_TENSOR_PARALLEL_SIZE:-1}"
-      - --max-model-len
-      - "${ECHO_CONTEXT_TOKENS:-262144}"
-      - --gpu-memory-utilization
-      - "${ECHO_GPU_MEMORY_UTILIZATION:-0.90}"
-      - --max-num-seqs
-      - "${ECHO_MAX_NUM_SEQS:-4}"
-      - --enable-auto-tool-choice
-      - --tool-call-parser
-      - gemma4
-      - --reasoning-parser
-      - gemma4
-      - --language-model-only
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8000"
-
+        max-file: '3'
+    volumes:
+    - inference-cache:/root/.cache/vllm
+    healthcheck:
+      test:
+      - CMD
+      - python3
+      - -c
+      - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')
+      interval: 10s
+      timeout: 5s
+      retries: 120
+      start_period: 60s
+    profiles:
+    - managed
 volumes:
-  inference-cache:
+  inference-cache: null

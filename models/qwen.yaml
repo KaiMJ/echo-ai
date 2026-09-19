@@ -1,0 +1,25 @@
+# One profile for Echo requests and local vLLM deployment.
+# context_tokens includes input + reasoning + final output.
+model: cyankiwi/Qwen3.8-27B-AWQ-INT4
+reasoning_enabled: true
+return_reasoning: true
+context_tokens: 262144
+max_tokens: 65536
+max_context_chars: null
+timeout: 600
+temperature: 1.0
+top_p: 0.95
+top_k: 20
+provider: hosted_vllm
+request_format: qwen
+preserve_thinking: false
+reasoning_effort: medium
+deployment:
+  revision: 6e134bae811fb5adac50ee042ae5f029ac6779aa
+  cache_env: ECHO_HF_HUB_CACHE
+  tensor_parallel_size: 2
+  pipeline_parallel_size: 1
+  gpu_memory_utilization: 0.9
+  max_num_seqs: 1
+  tool_call_parser: qwen3_xml
+  reasoning_parser: qwen3

@@ -65,8 +65,10 @@ TOOLS = [
 DELEGATE = function(
     "delegate",
     "Ask a child agent to inspect, search, or review the current workspace. "
+    "Accepts only task. Include any file or directory paths in the task text; "
+    "do not pass a separate path argument. "
     "Child cannot edit or execute bash; returns findings. No nested delegation.",
-    {"task": STRING},
+    {"task": {"type": "string", "description": "Review instructions, including paths and scope."}},
     ["task"],
 )
 

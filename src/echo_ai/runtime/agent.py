@@ -160,7 +160,19 @@ class Agent:
                                 )
                             else:
                                 result = await self.sandbox.execute(name, args)
-                    except (ValueError, ValidationError, OSError, RuntimeError) as error:
+                    except ValidationError as error:
+                        result = {
+                            "error": f"Invalid arguments for {name}: {error.message}"[:2000],
+                            "allowed_arguments": sorted(schema.get("properties", {})),
+                            "required_arguments": schema.get("required", []),
+                            "hint": "Correct the arguments and retry this tool call.",
+                        }
+                        if name == "delegate":
+                            result["hint"] = (
+                                'Call delegate with only {"task": "instructions including paths"}. '
+                                "Put file/directory paths inside task, not in a separate argument."
+                            )
+                    except (ValueError, OSError, RuntimeError) as error:
                         result = {"error": str(error)[:2000]}
                     metrics["tool_seconds"] += time.monotonic() - tool_started
                     if result.get("error") or result.get("exit_code", 0) != 0:
