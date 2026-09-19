@@ -325,9 +325,8 @@ class TranscriptControl(UIControl):
         rows = []
         if not self.popup and not entries:
             for style, text in (
-                ("class:heading", "What would you like to work on?"),
-                ("class:muted", "Describe a change, investigate a bug, or ask about the code."),
-                ("class:muted", "/help for commands · /diff to inspect changes"),
+                ("class:accent", "   _  _     _  _"),
+                ("class:accent", " _/ \\/ \\___/ \\/ \\_"),
             ):
                 rows.append(([(style, fit_text(text, width))], None))
             rows = rows[:height]
@@ -534,14 +533,26 @@ class TerminalChat:
             focus_on_click=True,
             style="class:composer",
         )
+        self.permission_input = TextArea(
+            prompt="tell Echo › ",
+            multiline=True,
+            height=self.input_height,
+            focus_on_click=True,
+            style="class:composer",
+        )
+        self.permission_choices = Window(
+            FormattedTextControl(self.approval_text, focusable=True), height=3,
+            style="class:permission",
+        )
         keys = KeyBindings()
 
         @keys.add("enter")
         def submit(event):
             if self.approval is not None:
                 if self.approval_correction:
-                    self.resolve_approval("deny", self.editor.text.strip())
-                    self.editor.buffer.reset()
+                    message = self.permission_input.text.strip()
+                    if message:
+                        self.resolve_approval("deny", message)
                 return
             if self.editor.buffer.complete_state:
                 completion = (
@@ -567,7 +578,9 @@ class TerminalChat:
 
         @keys.add("c-j")
         def newline(event):
-            if not self.selected and not self.copy_mode:
+            if self.approval_correction:
+                self.permission_input.buffer.insert_text("\n")
+            elif self.approval is None and not self.selected and not self.copy_mode:
                 self.editor.buffer.insert_text("\n")
 
         @keys.add("s-tab")
@@ -591,13 +604,19 @@ class TerminalChat:
         @keys.add("t", filter=Condition(lambda: self.approval is not None and not self.approval_correction))
         def tell_echo(event):
             self.approval_correction = True
-            self.editor.buffer.reset()
-            self.app.layout.focus(self.editor)
+            self.permission_input.buffer.reset()
+            self.app.layout.focus(self.permission_input)
             self.app.invalidate()
 
         @keys.add("escape")
         def close(event):
-            if self.editor.buffer.complete_state is not None:
+            if self.approval_correction:
+                self.approval_correction = False
+                self.app.layout.focus(self.permission_choices)
+                self.app.invalidate()
+            elif self.approval is not None:
+                self.resolve_approval("deny")
+            elif self.editor.buffer.complete_state is not None:
                 self.editor.buffer.cancel_completion()
             elif self.copy_mode:
                 self.toggle_copy()
@@ -657,6 +676,17 @@ class TerminalChat:
                 self.app.exit()
 
         status = Window(FormattedTextControl(self.status), height=1, style="class:muted")
+        permission_panel = Frame(
+            HSplit([
+                self.permission_choices,
+                ConditionalContainer(
+                    self.permission_input,
+                    filter=Condition(lambda: self.approval_correction),
+                ),
+            ]),
+            title="Permission required",
+            style="class:permission",
+        )
         body = HSplit(
             [
                 Window(
@@ -664,15 +694,22 @@ class TerminalChat:
                     height=1,
                 ),
                 VSplit([Window(width=2), Window(self.transcript), Window(width=2)]),
-                Window(
-                    FormattedTextControl(self.composer_hint),
-                    height=1,
-                    style="class:muted",
-                ),
+                VSplit([
+                    Window(FormattedTextControl(self.composer_hint), height=1, style="class:muted"),
+                    Window(FormattedTextControl(self.mode_label), width=22, height=1),
+                    Window(width=2),
+                ]),
                 VSplit(
                     [
                         Window(width=2),
-                        Frame(self.editor, title="Drag to resize", style="class:composer-box"),
+                        ConditionalContainer(
+                            Frame(self.editor, title="Drag to resize", style="class:composer-box"),
+                            filter=Condition(lambda: self.approval is None),
+                        ),
+                        ConditionalContainer(
+                            permission_panel,
+                            filter=Condition(lambda: self.approval is not None),
+                        ),
                         Window(width=2),
                     ]
                 ),
@@ -683,15 +720,10 @@ class TerminalChat:
             Frame(Window(self.details), title=self.details_title),
             filter=Condition(lambda: self.selected is not None),
         )
-        approval_popup = ConditionalContainer(
-            Frame(Window(FormattedTextControl(self.approval_text), height=5), title="Permission required", style="class:composer-box"),
-            filter=Condition(lambda: self.approval is not None),
-        )
         layout = FloatContainer(
             body,
             floats=[
                 Float(content=popup, left=2, right=2, top=2, bottom=2),
-                Float(content=approval_popup, left=2, right=2, top=2),
                 Float(xcursor=True, ycursor=True, content=CompletionsMenu(max_height=10)),
             ],
         )
@@ -721,23 +753,41 @@ class TerminalChat:
             return ""
         item = self.approval
         target = item["args"].get("command") or item["args"].get("path") or ""
+        parts = [
+            ("class:warning", f" {item['name']}  "),
+            ("class:permission-target", fit_text(target, max(8, self.app.output.get_size().columns - 18))),
+            ("", "\n"),
+        ]
         if self.approval_correction:
-            return f"{item['name']}: {target}\nTell Echo what to do in the input below, then press Enter."
-        choices = "Y Allow once   N Deny   T Tell Echo"
-        if item["rule"]:
-            choices += f"   A Allow ({item['rule']}) for this session"
-        return f"{item['name']}: {target}\n{choices}"
+            parts.append(("class:muted", " Enter sends · Ctrl+J new line · Esc back"))
+        else:
+            parts.extend([
+                ("class:success", " Y "), ("", "Allow once   "),
+                ("class:error", " N "), ("", "Deny   "),
+                ("class:accent", " T "), ("", "Tell Echo"),
+            ])
+            if item["rule"]:
+                parts.extend([
+                    ("", "\n"),
+                    ("class:success", " A "),
+                    ("", f"Allow ({item['rule']}) for this session"),
+                ])
+        return parts
 
     async def ask_permission(self, name, args, rule):
         future = asyncio.get_running_loop().create_future()
         self.approval = {"name": name, "args": args, "rule": rule, "future": future}
         self.approval_correction = False
+        self.permission_input.buffer.reset()
+        self.app.layout.focus(self.permission_choices)
         self.app.invalidate()
         try:
             return await future
         finally:
             self.approval = None
             self.approval_correction = False
+            self.permission_input.buffer.reset()
+            self.app.layout.focus(self.editor)
             self.app.invalidate()
 
     def resolve_approval(self, decision, message=""):
@@ -753,7 +803,7 @@ class TerminalChat:
     def install_resize_handlers(self, app):
         """Capture dragging across panes, using terminal coordinates throughout."""
         info = self.editor.window.render_info
-        if info is None or self.selected or self.copy_mode:
+        if info is None or self.selected or self.copy_mode or self.approval is not None:
             self.resize_drag = None
             return
         handlers = app.renderer.mouse_handlers
@@ -865,7 +915,6 @@ class TerminalChat:
         session = safe_text(self.agent.session_id)[:8]
         metadata = f"  /  {self.renderer.model}" if self.renderer.model else ""
         metadata += f"  /  {session}"
-        metadata += "  /  YOLO" if self.agent.permissions.yolo else "  /  Default"
         icon = self.spinner() if self.busy and not self.copy_mode else "✦"
         return [
             ("class:spinner", f" {icon}"),
@@ -873,9 +922,16 @@ class TerminalChat:
             ("class:muted", fit_text(metadata, width - 7)),
         ]
 
+    def mode_label(self):
+        if self.agent.permissions.yolo:
+            return [("", " " * 5), ("class:error", "YOLO"), ("class:muted", " · Shift+Tab")]
+        return [("", " " * 2), ("class:success", "DEFAULT"), ("class:muted", " · Shift+Tab")]
+
     def composer_hint(self):
         width = self.app.output.get_size().columns
-        if self.copy_mode:
+        if self.approval is not None:
+            items = ["Permission required", "Choose in the box below"]
+        elif self.copy_mode:
             items = ["Select text", "Cmd+C (Mac) / Ctrl+Shift+C (Linux)", "Esc Return"]
         elif (self.details if self.selected else self.transcript).selected_text():
             items = ["Ctrl+C Copy", "Click again to deselect"]
@@ -886,7 +942,7 @@ class TerminalChat:
         else:
             items = ["Enter Send", "Ctrl+J New line", "Ctrl+C Copy"]
             items.append("Ctrl+D Stop" if self.busy else "/help Commands")
-        clear = bool(self.editor.text and not self.selected and not self.copy_mode)
+        clear = bool(self.editor.text and self.approval is None and not self.selected and not self.copy_mode)
         label = "Ctrl+Shift+U Clear input" if width >= 60 else "Clear input"
         reserved = len(label) + 3 if clear else 0
         available = max(0, width - reserved - 2)

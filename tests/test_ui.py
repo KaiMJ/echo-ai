@@ -109,7 +109,7 @@ class Agent:
     async def run(self, prompt):
         render("text", "streamed ")
         await asyncio.sleep(.05)
-        render("text", "response")
+        render("text", "response-" + prompt)
         if prompt == "wait":
             await asyncio.sleep(60)
         return {"status": "completed"}
@@ -121,10 +121,10 @@ asyncio.run(chat(Agent(), Path(sys.argv[1])))
     try:
         process.expect("echo ›")
         process.send("hello\r")
-        process.expect("response")
+        process.expect("response-hello")
         process.expect("/help")
         process.send("wait\r")
-        process.expect("response")
+        process.expect("response-wait")
         process.sendcontrol("d")
         process.expect("Cancelled")
         process.send("/status\r")

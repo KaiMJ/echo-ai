@@ -26,6 +26,34 @@ def lines(control, width=80, height=30):
     return ["".join(part[1] for part in content.get_line(i)) for i in range(content.line_count)]
 
 
+async def test_permission_correction_keeps_draft_and_cursor(chat):
+    import asyncio
+
+    chat.editor.text = "unfinished draft"
+    chat.editor.buffer.cursor_position = 4
+    pending = asyncio.create_task(
+        chat.ask_permission("bash", {"command": "pytest tests/unit"}, "pytest *")
+    )
+    await asyncio.sleep(0)
+    assert chat.approval is not None
+    assert chat.editor.text == "unfinished draft"
+    assert chat.editor.buffer.cursor_position == 4
+    chat.approval_correction = True
+    chat.permission_input.text = "Run a smaller test"
+    chat.resolve_approval("deny", chat.permission_input.text)
+    assert await pending == ("deny", "Run a smaller test")
+    assert chat.editor.text == "unfinished draft"
+    assert chat.editor.buffer.cursor_position == 4
+
+
+def test_mode_label_fits_above_composer(chat):
+    for yolo in (False, True):
+        chat.agent.permissions.yolo = yolo
+        label = "".join(fragment[1] for fragment in chat.mode_label())
+        assert len(label) == 21
+        assert label.endswith("Shift+Tab")
+
+
 def test_answer_stays_in_place_at_completion(chat):
     chat.renderer.emit("reasoning", "**Plan**\n\nInspect the code.")
     chat.renderer.emit("text", "## Result\n\n" + "Answer text.\n" * 12)

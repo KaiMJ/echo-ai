@@ -54,6 +54,10 @@ class Theme:
             "composer": composer,
             "composer-box": composer,
             "composer-box frame.border": f"{self.input_border} bg:{self.input_background}",
+            "permission": composer,
+            "permission frame.border": f"{self.warning} bg:{self.input_background}",
+            "permission frame.label": f"{self.warning} bold",
+            "permission-target": f"{self.input_foreground} bold",
             "frame.border": self.muted,
             "frame.label": "bold",
         }
