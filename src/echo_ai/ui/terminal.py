@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import re
+import shlex
 import time
 from dataclasses import dataclass, field, replace
 from io import StringIO
@@ -33,7 +34,7 @@ from prompt_toolkit.layout.utils import explode_text_fragments
 from prompt_toolkit.mouse_events import MouseButton, MouseEventType
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import Frame, TextArea
-from rich.console import Console
+from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.syntax import Syntax
 from rich.text import Text
@@ -75,6 +76,36 @@ def key_highlights(value, width):
         for part in re.split(keys, text)
         if part
     ]
+
+
+def diff_renderable(patch, mode):
+    """Show a compact file list above the unmodified session patch."""
+    label = "host checkout" if mode == "local" else "sandbox copy"
+    heading = Text(f"Current {label} vs. session start", style="bold")
+    files = []
+    current = None
+    for line in patch.splitlines():
+        if line.startswith("diff --git "):
+            if current is not None:
+                files.append(current)
+            paths = shlex.split(line.removeprefix("diff --git "))
+            current = ["Modified", paths[-1].removeprefix("b/")]
+        elif current is not None:
+            if line.startswith("new file mode "):
+                current[0] = "Added"
+            elif line.startswith("deleted file mode "):
+                current[0] = "Deleted"
+            elif line.startswith("rename to "):
+                current[:] = ["Renamed", line.removeprefix("rename to ")]
+    if current is not None:
+        files.append(current)
+    summary = Text("\n".join(f"{status:8} {path}" for status, path in files))
+    return Group(
+        heading,
+        summary,
+        Text(""),
+        Syntax(patch, "diff", word_wrap=True, theme="ansi_light", background_color="default"),
+    )
 
 
 @dataclass
@@ -933,10 +964,15 @@ class TerminalChat:
         if text == "/diff":
             try:
                 patch = await asyncio.to_thread(self.agent.sandbox.diff)
-                self.add(
-                    "notice",
-                    "Changes",
-                    "```diff\n" + patch + "\n```" if patch.strip() else "No changes yet.",
+                self.open_details(
+                    Entry(
+                        "notice",
+                        "Changes",
+                        patch if patch.strip() else "No changes yet.",
+                        renderable=diff_renderable(patch, self.agent.sandbox.mode)
+                        if patch.strip()
+                        else None,
+                    )
                 )
             except (RuntimeError, ValueError, OSError) as error:
                 self.add("notice", "Error", str(error))

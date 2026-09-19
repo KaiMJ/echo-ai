@@ -322,6 +322,27 @@ async def test_help_and_formatted_status(chat):
     assert "Session status" in "\n".join("".join(p[1] for p in line) for line in rendered)
 
 
+@pytest.mark.parametrize("mode,label", [("local", "host checkout"), ("sandbox", "sandbox copy")])
+async def test_diff_shows_file_summary_and_literal_patch(chat, mode, label):
+    patch = (
+        "diff --git a/code.py b/code.py\n"
+        "--- a/code.py\n+++ b/code.py\n@@ -1 +1 @@\n-old\n+new\n"
+        "diff --git a/new.txt b/new.txt\nnew file mode 100644\n"
+        "--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+created\n"
+    )
+    chat.agent.sandbox.mode = mode
+    chat.agent.sandbox.diff = lambda: patch
+    await chat.submit("/diff")
+    entry = chat.selected
+    assert entry not in chat.entries
+    rendered = "\n".join("".join(part[1] for part in line) for line in entry.markdown_lines(80))
+    assert f"Current {label} vs. session start" in rendered
+    assert "Modified code.py" in rendered
+    assert "Added    new.txt" in rendered
+    assert "-old" in rendered and "+new" in rendered
+    assert entry.text == patch
+
+
 async def test_session_list_switch_and_restored_conversation(chat, tmp_path, monkeypatch):
     from echo_ai.runtime.store import Store
 
