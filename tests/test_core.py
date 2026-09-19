@@ -328,7 +328,9 @@ async def test_cancel_between_tools_does_not_replay(tmp_path):
 
     sandbox = CancelSandbox(tmp_path)
     with pytest.raises(asyncio.CancelledError):
-        await Agent(FakeModel([message]), store, sandbox, key).run("go")
+        agent = Agent(FakeModel([message]), store, sandbox, key)
+        agent.permissions.yolo = True
+        await agent.run("go")
     store.recover(key)
     results = [m for m in store.messages(key) if m["role"] == "tool"]
     assert len(results) == 2

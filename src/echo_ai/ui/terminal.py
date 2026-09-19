@@ -41,6 +41,7 @@ from rich.text import Text
 from rich.theme import Theme as RichTheme
 
 from echo_ai.config import load_theme
+from echo_ai.runtime.permissions import Permissions
 from echo_ai.runtime.revisions import apply_sandbox, move_turn
 from echo_ai.ui.commands import (
     COMMANDS,
@@ -509,6 +510,11 @@ class TerminalChat:
         self.drafts = {}
         self.selected = None
         self.task = None
+        self.approval = None
+        self.approval_correction = False
+        if not hasattr(agent, "permissions"):
+            agent.permissions = Permissions()
+        agent.permissions.ask = self.ask_permission
         self.copy_mode = False
         self.copy_entries = []
         self.copy_selected = None
@@ -532,6 +538,11 @@ class TerminalChat:
 
         @keys.add("enter")
         def submit(event):
+            if self.approval is not None:
+                if self.approval_correction:
+                    self.resolve_approval("deny", self.editor.text.strip())
+                    self.editor.buffer.reset()
+                return
             if self.editor.buffer.complete_state:
                 completion = (
                     self.editor.buffer.complete_state.current_completion
@@ -548,7 +559,8 @@ class TerminalChat:
             elif not self.busy:
                 text = self.editor.text.strip()
                 if text:
-                    self.editor.buffer.append_to_history()
+                    if text not in {"/exit", "/new"}:
+                        self.editor.buffer.append_to_history()
                     self.editor.buffer.reset()
                     self.editor.buffer.load_history_if_not_yet_loaded()
                     self.task = self.app.create_background_task(self.submit(text))
@@ -557,6 +569,31 @@ class TerminalChat:
         def newline(event):
             if not self.selected and not self.copy_mode:
                 self.editor.buffer.insert_text("\n")
+
+        @keys.add("s-tab")
+        def toggle_permissions(event):
+            self.agent.permissions.yolo = not self.agent.permissions.yolo
+            self.app.invalidate()
+
+        @keys.add("y", filter=Condition(lambda: self.approval is not None and not self.approval_correction))
+        def approve_once(event):
+            self.resolve_approval("once")
+
+        @keys.add("a", filter=Condition(lambda: self.approval is not None and not self.approval_correction))
+        def approve_session(event):
+            if self.approval["rule"]:
+                self.resolve_approval("session")
+
+        @keys.add("n", filter=Condition(lambda: self.approval is not None and not self.approval_correction))
+        def deny(event):
+            self.resolve_approval("deny")
+
+        @keys.add("t", filter=Condition(lambda: self.approval is not None and not self.approval_correction))
+        def tell_echo(event):
+            self.approval_correction = True
+            self.editor.buffer.reset()
+            self.app.layout.focus(self.editor)
+            self.app.invalidate()
 
         @keys.add("escape")
         def close(event):
@@ -646,10 +683,15 @@ class TerminalChat:
             Frame(Window(self.details), title=self.details_title),
             filter=Condition(lambda: self.selected is not None),
         )
+        approval_popup = ConditionalContainer(
+            Frame(Window(FormattedTextControl(self.approval_text), height=5), title="Permission required", style="class:composer-box"),
+            filter=Condition(lambda: self.approval is not None),
+        )
         layout = FloatContainer(
             body,
             floats=[
                 Float(content=popup, left=2, right=2, top=2, bottom=2),
+                Float(content=approval_popup, left=2, right=2, top=2),
                 Float(xcursor=True, ycursor=True, content=CompletionsMenu(max_height=10)),
             ],
         )
@@ -673,6 +715,35 @@ class TerminalChat:
     @property
     def busy(self):
         return self.task is not None and not self.task.done()
+
+    def approval_text(self):
+        if self.approval is None:
+            return ""
+        item = self.approval
+        target = item["args"].get("command") or item["args"].get("path") or ""
+        if self.approval_correction:
+            return f"{item['name']}: {target}\nTell Echo what to do in the input below, then press Enter."
+        choices = "Y Allow once   N Deny   T Tell Echo"
+        if item["rule"]:
+            choices += f"   A Allow ({item['rule']}) for this session"
+        return f"{item['name']}: {target}\n{choices}"
+
+    async def ask_permission(self, name, args, rule):
+        future = asyncio.get_running_loop().create_future()
+        self.approval = {"name": name, "args": args, "rule": rule, "future": future}
+        self.approval_correction = False
+        self.app.invalidate()
+        try:
+            return await future
+        finally:
+            self.approval = None
+            self.approval_correction = False
+            self.app.invalidate()
+
+    def resolve_approval(self, decision, message=""):
+        if self.approval and not self.approval["future"].done():
+            self.approval["future"].set_result((decision, message))
+            self.app.invalidate()
 
     def input_height(self):
         if not hasattr(self, "app"):
@@ -794,6 +865,7 @@ class TerminalChat:
         session = safe_text(self.agent.session_id)[:8]
         metadata = f"  /  {self.renderer.model}" if self.renderer.model else ""
         metadata += f"  /  {session}"
+        metadata += "  /  YOLO" if self.agent.permissions.yolo else "  /  Default"
         icon = self.spinner() if self.busy and not self.copy_mode else "✦"
         return [
             ("class:spinner", f" {icon}"),
@@ -972,6 +1044,11 @@ class TerminalChat:
         self.transcript.follow = True
         if text == "/exit":
             self.app.exit()
+            return
+        if text in {"/yolo", "/default"}:
+            self.agent.permissions.yolo = text == "/yolo"
+            self.add("notice", "Permissions", "YOLO" if self.agent.permissions.yolo else "Default")
+            self.app.invalidate()
             return
         if text == "/new":
             self.app.exit(result=NEW_SESSION)

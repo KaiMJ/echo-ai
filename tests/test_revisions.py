@@ -89,6 +89,7 @@ async def test_agent_records_actual_edit_and_manual_change_stays_out_of_diff(ses
             return next(responses), {"prompt_tokens": 1, "completion_tokens": 1}
 
     agent = Agent(Model(), session.store, session.sandbox, session.session_id)
+    agent.permissions.yolo = True
     result = await agent.run("Change second")
     assert result["status"] == "completed"
     changes = session.store.tool_changes(session.session_id)

@@ -646,6 +646,22 @@ async def test_new_command_exits_to_fresh_session(chat, monkeypatch):
     assert chat.entries[-1].text == "Previous answer"
 
 
+@pytest.mark.parametrize("command", ["/exit", "/new"])
+async def test_exit_commands_do_not_write_input_history(tmp_path, command):
+    import asyncio
+
+    from prompt_toolkit.input import create_pipe_input
+
+    with create_pipe_input() as pipe:
+        instance = TerminalChat(
+            SimpleNamespace(session_id="test", permissions=SimpleNamespace(ask=None, yolo=False)), tmp_path,
+            Renderer(Console(file=StringIO())), input=pipe, output=DummyOutput(),
+        )
+        pipe.send_text(command + "\r")
+        await asyncio.wait_for(instance.run(), timeout=2)
+        assert not (tmp_path / "input-history").exists()
+
+
 def test_block_selection_fills_blank_lines_and_preserves_colors(chat):
     from prompt_toolkit.styles import Style
 

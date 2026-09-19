@@ -9,6 +9,7 @@ import httpx
 from jsonschema import ValidationError, validate
 
 from echo_ai.runtime.model import request_messages
+from echo_ai.runtime.permissions import Permissions
 from echo_ai.runtime.tools import DELEGATE, tools_for
 
 SYSTEM = """You are Echo, a coding agent working in a disposable Docker workspace.
@@ -33,6 +34,7 @@ class Agent:
         self.model, self.store, self.sandbox = model, store, sandbox
         self.session_id, self.emit, self.child = session_id, emit, child
         self.budget = budget
+        self.permissions = Permissions()
         self._shared_budget = budget
         self.tools = [
             t
@@ -152,6 +154,10 @@ class Agent:
                         args = json.loads(call["function"]["arguments"])
                         validate(args, schema)
                         self.emit("tool_detail", {"name": name, "args": args})
+                        allowed, reason = await self.permissions.check(name, args)
+                        if not allowed:
+                            result = {"error": reason}
+                            raise PermissionError(reason)
                         if name == "delegate":
                             result = await self.delegate(args["task"])
                             for metric in (
@@ -213,7 +219,7 @@ class Agent:
                                 'Call delegate with only {"task": "instructions including paths"}. '
                                 "Put file/directory paths inside task, not in a separate argument."
                             )
-                    except (ValueError, OSError, RuntimeError) as error:
+                    except (ValueError, OSError, RuntimeError, PermissionError) as error:
                         result = {"error": str(error)[:2000]}
                     metrics["tool_seconds"] += time.monotonic() - tool_started
                     if result.get("error") or result.get("exit_code", 0) != 0:

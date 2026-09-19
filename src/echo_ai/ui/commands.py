@@ -26,6 +26,8 @@ COMMANDS = {
     "/help": "List commands",
     "/new": "Start a fresh session in this repository",
     "/status": "Show session, execution mode, and token usage",
+    "/yolo": "Allow tools without asking until /default or exit",
+    "/default": "Ask before bash, write, and edit calls",
     "/sessions": "List sessions for this repository",
     "/sessions ID": "Switch to a session (short IDs or latest accepted)",
     "/diff": "Show changes from agent edit and write tools",
@@ -82,6 +84,7 @@ def status_rows(agent, renderer):
     return [
         ("Session", agent.session_id),
         ("Mode", getattr(agent.sandbox, "mode", "sandbox")),
+        ("Permissions", "YOLO" if agent.permissions.yolo else "Default"),
         ("Workspace", str(agent.sandbox.workspace)),
         ("Context", renderer.active_context_text()),
         ("Generation", renderer.active.generated_text(detailed=True)),

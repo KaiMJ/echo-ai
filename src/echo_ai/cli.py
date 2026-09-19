@@ -23,6 +23,7 @@ from echo_ai.config import Config, load_theme, state_dir
 from echo_ai.runtime.agent import Agent
 from echo_ai.runtime.locking import WorkspaceBusy
 from echo_ai.runtime.model import Model
+from echo_ai.runtime.permissions import Permissions
 from echo_ai.runtime.revisions import apply_sandbox, move_turn
 from echo_ai.runtime.store import Store, workspace_lock
 from echo_ai.ui.commands import (
@@ -48,6 +49,13 @@ def make_prompt(root, **kwargs):
     @keys.add("c-j")
     def newline(event):
         event.current_buffer.insert_text("\n")
+
+    @keys.add("s-tab")
+    def toggle_mode(event):
+        permissions = getattr(event.app, "echo_permissions", None)
+        if permissions is not None:
+            permissions.yolo = not permissions.yolo
+            console.print(f"Mode: {'YOLO' if permissions.yolo else 'Default'}", style="bold red" if permissions.yolo else "bold green")
 
     return PromptSession(
         history=FileHistory(str(root / "input-history")),
@@ -81,6 +89,8 @@ async def run_turn(agent, prompt):
 
 
 async def chat(agent, root):
+    if not hasattr(agent, "permissions"):
+        agent.permissions = Permissions()
     if console.is_terminal and not renderer.plain and not console.is_dumb_terminal:
         from echo_ai.ui.terminal import TerminalChat
 
@@ -89,6 +99,24 @@ async def chat(agent, root):
     if console.is_terminal and not renderer.plain and not console.is_dumb_terminal:
         prompt_options["bottom_toolbar"] = renderer.toolbar
     prompt = make_prompt(root, **prompt_options)
+    if hasattr(prompt, "app"):
+        prompt.app.echo_permissions = agent.permissions
+
+    async def ask_permission(name, args, rule):
+        target = args.get("command") or args.get("path") or ""
+        console.print(f"Permission · {name}: {target}", style="bold yellow", markup=False)
+        choices = "[y] Allow once  [n] Deny  [t] Tell Echo" + (f"  [a] Allow ({rule}) for this session" if rule else "")
+        console.print(choices, style="yellow", markup=False)
+        while True:
+            answer = (await prompt.prompt_async("Choice › ")).strip().lower()
+            if answer in {"y", "a", "n", "t"}:
+                if answer == "a" and not rule:
+                    continue
+                if answer == "t":
+                    return "deny", (await prompt.prompt_async("Tell Echo › ")).strip()
+                return {"y": "once", "a": "session", "n": "deny"}[answer], ""
+
+    agent.permissions.ask = ask_permission
     console.print("Enter sends · Ctrl+J adds a line · Ctrl-C cancels · Ctrl-D exits")
     console.print("/help  /diff  /status  /exit", style="dim")
     while True:
@@ -102,6 +130,10 @@ async def chat(agent, root):
             continue
         if text == "/exit":
             break
+        if text in {"/yolo", "/default"}:
+            agent.permissions.yolo = text == "/yolo"
+            console.print(f"Mode: {'YOLO' if agent.permissions.yolo else 'Default'}", style="bold red" if agent.permissions.yolo else "bold green")
+            continue
         if text == "/new":
             return NEW_SESSION
         if text == "/help":
@@ -398,13 +430,14 @@ async def execute(args):
                     print(safe_text(patch))
                 return 0
             agent = Agent(Model(config), store, sandbox, key, render, child=child)
+            agent.permissions.yolo = getattr(args, "yolo", False)
             renderer.configure(agent, plain=console.is_dumb_terminal or not console.is_terminal)
             console.print(f"Session: {key} · {sandbox.mode}", style="bold", markup=False)
             console.print(f"Workspace: {sandbox.workspace}", style="dim", markup=False)
             if args.command == "run":
                 result = await run_turn(agent, args.task)
                 console.print(f"Inspect changes: echo-ai diff {key}", style="dim")
-                return 0 if result["status"] == "completed" else 1
+                return 0 if result["status"] == "completed" and not agent.permissions.blocked else 1
             fallback = key
             pointer = await chat(agent, root)
             if pointer is NEW_SESSION:
@@ -470,6 +503,7 @@ def build_parser():
         p = sub.add_parser(command, help=help_)
         p.add_argument("--repo", default=".", help="Repository path (default: current directory)")
         p.add_argument("--sandbox", action="store_true", help="Use an isolated Docker workspace")
+        p.add_argument("--yolo", action="store_true", help="Run tools without approval prompts")
         p.add_argument("--sandbox-image", help="Docker image for a new sandbox session")
         if command == "run":
             p.add_argument("task", help="Task to execute")
@@ -484,6 +518,7 @@ def build_parser():
     p = sub.add_parser("resume", help="Resume a saved session (also: chat --resume)")
     p.add_argument("session", help="Session ID, unique prefix, or latest")
     p.add_argument("--repo", default=".", help="Repository used to resolve latest")
+    p.add_argument("--yolo", action="store_true", help="Run tools without approval prompts")
     p = sub.add_parser("diff", help="Show changes from agent edit and write tools")
     p.add_argument("session", help="Session ID or unique prefix")
     p.add_argument("--output", type=Path, help="Save recorded change history (not one applyable patch)")

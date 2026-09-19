@@ -120,7 +120,7 @@ async def test_run_defaults_to_local_tools_and_persists_mode(tmp_path, monkeypat
     monkeypatch.setattr(cli, "state_dir", lambda: root)
     monkeypatch.setattr(Config, "from_env", lambda: Config())
     monkeypatch.setattr(cli, "Model", lambda config: Model(config, httpx.MockTransport(respond)))
-    args = cli.build_parser().parse_args(["run", "--repo", str(repo), "Change hello"])
+    args = cli.build_parser().parse_args(["run", "--yolo", "--repo", str(repo), "Change hello"])
     assert await cli.execute(args) == 0
     assert (repo / "hello.txt").read_text() == "after"
     assert len(calls) == 2
