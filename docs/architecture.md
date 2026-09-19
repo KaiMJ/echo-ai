@@ -17,13 +17,14 @@ sandbox, and output callback.
 | Module | Responsibility |
 | --- | --- |
 | `cli.py` | Commands, prompt, streaming display, cancellation, workspace lock |
-| `config.py` | Shared .env loading, validation, and execution defaults |
+| `config/` | .env loading, validation, and execution defaults |
 | `model.py` | HTTP streaming, complete tool-call reconstruction, usage |
 | `agent.py` | Sequential model/tool loop and review delegation |
 | `tools.py` | JSON schemas for model requests and argument validation |
-| `sandbox.py` | Repository copy, Docker lifecycle, tools, baseline diff |
+| `sandbox.py` | Repository copy, Docker lifecycle, private checkpoints |
 | `store.py` | SQLite sessions, messages, runs, interruption reconciliation |
-| `local.py` | Host tools, process cleanup, separate snapshot for diffs |
+| `local.py` | Host tools, process cleanup, touched-file checkpoints |
+| `runtime/revisions.py`, `workspace/revisions.py` | Conversation movement and three-way file restores |
 | `commands.py` | Shared chat help, status, and session formatting |
 
 ## Execution
@@ -67,14 +68,14 @@ automatically. The model must inspect current files before retrying. Ctrl-C
 cancels inference or tool execution. Cleanup kills the local tool process group
 or removes the active Docker container.
 
-Local mode edits the original checkout and runs shell tools on the host. A separate
-session-owned Git baseline records the initial nonignored repository contents.
-Diff refreshes a snapshot against that baseline without touching the checkout's
-index or branch. It includes user edits made after session creation as well.
-
-Sandbox mode copies the repository and leaves the original unchanged. Its Git
-baseline stays outside the container mount. Exported patches are applied manually;
-changes in the original checkout are not synchronized into the copy.
+Local mode edits the original checkout and runs shell tools on the host. It
+checkpoints files touched by agent edit and write tools in a private Git directory.
+Sandbox mode copies eligible project files and runs tools against that copy.
+`/diff` shows recorded agent edits on the active conversation branch. `/undo` and
+`/redo` move the branch and merge its file changes. Sandbox `/apply` merges those
+recorded edits into the original project. Bash file changes are outside this
+history. See [Workspaces and file changes](workspaces-and-changes.md) for the
+design decisions and costs.
 
 Sessions persist their mode, source repository, title, and last activity. Existing
 sessions migrate as sandbox sessions; their source repository remains unknown.

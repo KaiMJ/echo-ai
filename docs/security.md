@@ -6,8 +6,8 @@ File tools constrain resolved paths to the checkout. Local tools retain timeouts
 and output caps; cancellation kills the tool's process group, including ordinary
 background children. Processes that deliberately detach into another session are
 outside that cleanup guarantee. Docker CPU/memory/process limits do not apply.
-Local diff baselines exclude ignored files, symlinks, and common credential paths;
-they are not complete backups and do not support undo.
+Local file checkpoints cover agent edit and write calls on eligible paths. They
+are not complete backups. `/undo` can restore those recorded changes.
 
 ## Optional sandbox boundaries
 
@@ -48,5 +48,7 @@ Git ignore rules are not a complete secrets filter. Review what is tracked and
 nonignored before opening a repository. Echo excludes symlinks and common
 credential directories, but cannot identify every sensitive file.
 
-There is no automatic patch application or network access from tools. Review
-patches and run your project's checks before applying changes. Tests help detect mistakes but do not prove arbitrary generated code safe.
+Sandbox tools have no network access. `/apply` merges recorded agent edit and
+write changes into the original project; it excludes Bash file changes. Review
+`/diff` and run your project's checks before applying changes. Tests help detect
+mistakes but do not prove arbitrary generated code safe.

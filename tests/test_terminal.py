@@ -398,6 +398,46 @@ def test_command_completion_only_at_prompt_start():
         assert suggestions(text) == []
 
 
+def test_exact_command_keeps_description_visible(chat):
+    chat.editor.text = "/undo"
+    hint = "".join(part[1] for part in chat.composer_hint())
+    assert "/undo" in hint
+    assert "Undo the latest completed turn" in hint
+
+
+@pytest.mark.asyncio
+async def test_history_write_does_not_block_enter(chat, monkeypatch):
+    import asyncio
+    import threading
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_store(self, string):
+        entered.set()
+        release.wait(timeout=2)
+
+    monkeypatch.setattr("prompt_toolkit.history.FileHistory.store_string", slow_store)
+    history = chat.editor.buffer.history
+    history.append_string("hello")
+    await asyncio.wait_for(asyncio.to_thread(entered.wait), timeout=1)
+    assert history.get_strings()[-1] == "hello"
+    release.set()
+    await history.flush()
+
+
+def test_transcript_rows_reused_when_only_editor_changes(chat):
+    chat.add("text", "Echo", "Answer")
+    lines(chat.transcript)
+    cached = chat.transcript.row_cache
+    chat.editor.text = "draft"
+    lines(chat.transcript)
+    assert chat.transcript.row_cache is cached
+    chat.entries[0].text = "Updated"
+    lines(chat.transcript)
+    assert chat.transcript.row_cache is not cached
+
+
 @pytest.mark.parametrize("kind", ["user", "text", "tool", "reasoning"])
 def test_click_selects_full_block_and_alt_copy_uses_source(chat, kind):
     entry = chat.add(

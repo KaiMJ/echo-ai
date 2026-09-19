@@ -43,6 +43,7 @@ from rich.theme import Theme as RichTheme
 from echo_ai.config import load_theme
 from echo_ai.runtime.revisions import apply_sandbox, move_turn
 from echo_ai.ui.commands import (
+    COMMANDS,
     NEW_SESSION,
     CommandCompleter,
     help_text,
@@ -206,6 +207,8 @@ class TranscriptControl(UIControl):
         self.block_text = None
         self.block_entry = None
         self.toggle_on_release = False
+        self.row_cache_key = None
+        self.row_cache = []
 
     def clear_selection(self):
         if self.selection_rows is not None:
@@ -299,11 +302,26 @@ class TranscriptControl(UIControl):
 
     def create_content(self, width, height):
         self.width = width
-        rows = []
         if self.chat.copy_mode:
             entries = [self.chat.copy_selected] if self.popup else self.chat.copy_entries
         else:
             entries = [self.chat.selected] if self.popup else self.chat.entries
+        key = (
+            width,
+            int((self.chat.copy_time if self.chat.copy_mode else time.monotonic()) * 8)
+            if any(entry is not None and entry.expandable and not entry.done for entry in entries)
+            else None,
+            tuple(
+                (
+                    id(entry), entry.kind, entry.title, entry.text, entry.detail,
+                    entry.done, entry.status, entry.tool, entry.path, id(entry.renderable),
+                )
+                for entry in entries if entry is not None
+            ),
+        )
+        if key == self.row_cache_key:
+            return self.show_rows(self.row_cache, height)
+        rows = []
         if not self.popup and not entries:
             for style, text in (
                 ("class:heading", "What would you like to work on?"),
@@ -394,6 +412,11 @@ class TranscriptControl(UIControl):
                             entry,
                         ),
                     )
+        self.row_cache_key = key
+        self.row_cache = rows
+        return self.show_rows(rows, height)
+
+    def show_rows(self, rows, height):
         if self.selection_rows is not None:
             rows = self.selection_rows
         self.rows = rows
@@ -455,6 +478,28 @@ class TranscriptControl(UIControl):
             return NotImplemented
 
 
+class DeferredFileHistory(FileHistory):
+    """Keep prompt_toolkit's in-memory history immediate; serialize disk writes."""
+
+    def __init__(self, filename):
+        super().__init__(filename)
+        self.pending_write = None
+
+    def store_string(self, string):
+        previous = self.pending_write
+
+        async def write():
+            if previous is not None:
+                await previous
+            await asyncio.to_thread(super(DeferredFileHistory, self).store_string, string)
+
+        self.pending_write = asyncio.create_task(write())
+
+    async def flush(self):
+        if self.pending_write is not None:
+            await self.pending_write
+
+
 class TerminalChat:
     def __init__(self, agent, root, renderer, *, input=None, output=None):
         self.agent, self.renderer = agent, renderer
@@ -477,7 +522,7 @@ class TerminalChat:
             prompt="echo › ",
             multiline=True,
             height=self.input_height,
-            history=FileHistory(str(root / "input-history")),
+            history=DeferredFileHistory(str(root / "input-history")),
             completer=CommandCompleter(),
             read_only=Condition(lambda: self.copy_mode),
             focus_on_click=True,
@@ -616,7 +661,7 @@ class TerminalChat:
             input=input,
             output=output,
             min_redraw_interval=0.016,
-            refresh_interval=0.125,
+            refresh_interval=None,
             after_render=self.install_resize_handlers,
             style=Style.from_dict(self.theme.styles()),
         )
@@ -764,6 +809,8 @@ class TerminalChat:
             items = ["Ctrl+C Copy", "Click again to deselect"]
         elif self.selected:
             items = ["Ctrl+C Copy section", "Esc Close"]
+        elif self.editor.text in COMMANDS:
+            items = [f"{self.editor.text} · {COMMANDS[self.editor.text]}", "Enter Run"]
         else:
             items = ["Enter Send", "Ctrl+J New line", "Ctrl+C Copy"]
             items.append("Ctrl+D Stop" if self.busy else "/help Commands")
@@ -1009,6 +1056,7 @@ class TerminalChat:
             return
         self.add("user", "You", text)
         self.renderer.start()
+        refresh = asyncio.create_task(self.refresh_activity())
         status = "failed"
         try:
             result = await self.agent.run(text)
@@ -1019,12 +1067,19 @@ class TerminalChat:
         except (RuntimeError, ValueError, OSError, httpx.HTTPError) as error:
             self.add("notice", "Error", str(error))
         finally:
+            refresh.cancel()
+            await asyncio.gather(refresh, return_exceptions=True)
             self.renderer.stop(status)
             # Some adapters do not emit run_end; close any unfinished trace too.
             for actor in ("Echo", "Review"):
                 self.on_event(
                     "child_run_end" if actor == "Review" else "run_end", {"status": status}
                 )
+            self.app.invalidate()
+
+    async def refresh_activity(self):
+        while True:
+            await asyncio.sleep(0.125)
             self.app.invalidate()
 
     def load_history(self, *, clear=False):
@@ -1047,4 +1102,5 @@ class TerminalChat:
             if self.busy:
                 self.task.cancel()
                 await asyncio.gather(self.task, return_exceptions=True)
+            await self.editor.buffer.history.flush()
             self.renderer.event_handler = None
