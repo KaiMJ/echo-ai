@@ -40,6 +40,10 @@ def test_tools_and_isolation(sandbox):
         assert "world" in (await sandbox.execute("search", {"pattern": "world"}))["output"]
         result = await sandbox.execute("bash", {"command": "python hello.py"})
         assert result["exit_code"] == 0 and result["output"].strip() == "world"
+        result = await sandbox.execute(
+            "bash", {"command": "python -c 'import litellm, pytest_asyncio'"}
+        )
+        assert result["exit_code"] == 0
         assert "hello" in (sandbox.workspace.parent.parent.parent / "repo/hello.py").read_text()
         assert (await sandbox.execute("read", {"path": "/etc/passwd"}))["error"]
         await sandbox.execute("bash", {"command": "ln -s /etc/passwd outside"})

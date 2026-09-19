@@ -50,7 +50,8 @@ def test_file_tools_enforce_configured_limits(tmp_path, monkeypatch):
 
 
 async def test_docker_receives_configured_limits(tmp_path, monkeypatch):
-    config = Config(sandbox_pids=12, sandbox_cpus=0.5, max_write_bytes=123)
+    config = Config(sandbox_pids=12, sandbox_cpus=0.5, max_write_bytes=123,
+                    sandbox_image="project-sandbox:local")
     sandbox = Sandbox(tmp_path, config)
     commands = []
 
@@ -64,6 +65,7 @@ async def test_docker_receives_configured_limits(tmp_path, monkeypatch):
     command = commands[0]
     assert "--pids-limit=12" in command
     assert "--cpus=0.5" in command
+    assert command[-1] == "project-sandbox:local"
     assert any('"max_write_bytes": 123' in arg for arg in command)
 
 

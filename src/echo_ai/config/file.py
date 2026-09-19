@@ -27,6 +27,7 @@ YAML_SECTIONS = {
     },
     "agent": {"max_steps", "child_max_steps"},
     "sandbox": {
+        "sandbox_image",
         "max_workspace_bytes",
         "sandbox_pids",
         "sandbox_memory_bytes",

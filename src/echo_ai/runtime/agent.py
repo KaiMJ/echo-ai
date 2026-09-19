@@ -85,6 +85,13 @@ class Agent:
         messages = request_messages(
             self.store.messages(self.session_id), return_reasoning=config.return_reasoning
         )
+        sync_workspace = bool(self.store.session(self.session_id)["needs_workspace_sync"])
+        if sync_workspace:
+            messages.insert(-1, {
+                "role": "system",
+                "content": "The active conversation branch changed. Current workspace files may include "
+                "edits outside this branch. Inspect relevant files before relying on prior file state.",
+            })
         try:
             for _ in range(
                 min(config.max_steps, config.child_max_steps) if self.child else config.max_steps
@@ -109,6 +116,9 @@ class Agent:
                     },
                 )
                 message, usage = await self.model.complete(messages, self.tools, self.emit)
+                if sync_workspace:
+                    self.store.clear_workspace_sync(self.session_id)
+                    sync_workspace = False
                 metrics["model_calls"] += 1
                 if metrics["ttft"] is None:
                     metrics["ttft"] = usage.get("ttft")
@@ -153,13 +163,44 @@ class Agent:
                             ):
                                 metrics[metric] += result.get("metrics", {}).get(metric, 0)
                         else:
-                            streaming = getattr(self.sandbox, "execute_stream", None)
-                            if streaming is not None:
-                                result = await streaming(
-                                    name, args, lambda text: self.emit("tool_output", text)
+                            checkpoint = getattr(self.sandbox, "checkpoint", None)
+                            record = (
+                                checkpoint is not None
+                                and name in {"edit", "write"}
+                                and self.sandbox.can_checkpoint(args["path"])
+                            )
+                            checkpoint_args = (args["path"],) if record else ()
+                            checkout = (
+                                await asyncio.to_thread(self.sandbox.checkout_id)
+                                if record and hasattr(self.sandbox, "checkout_id") else None
+                            )
+                            before = await asyncio.to_thread(checkpoint, *checkpoint_args) if record else None
+                            try:
+                                streaming = getattr(self.sandbox, "execute_stream", None)
+                                if streaming is not None:
+                                    result = await streaming(
+                                        name, args, lambda text: self.emit("tool_output", text)
+                                    )
+                                else:
+                                    result = await self.sandbox.execute(name, args)
+                            finally:
+                                if record:
+                                    after = await asyncio.to_thread(checkpoint, *checkpoint_args)
+                                    patch = await asyncio.to_thread(
+                                        self.sandbox.checkpoint_diff, before, after
+                                    )
+                                    self.store.record_tool_change(
+                                        self.session_id, run_id, call["id"], name,
+                                        before, after, patch, checkout,
+                                    )
+                            if name == "bash":
+                                result["undo_note"] = (
+                                    "Bash file changes are not tracked for /diff or /undo."
                                 )
-                            else:
-                                result = await self.sandbox.execute(name, args)
+                            elif name in {"edit", "write"} and not record:
+                                result["undo_note"] = (
+                                    "This path is excluded from local /diff and /undo checkpoints."
+                                )
                     except ValidationError as error:
                         result = {
                             "error": f"Invalid arguments for {name}: {error.message}"[:2000],

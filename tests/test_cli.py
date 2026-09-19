@@ -14,6 +14,7 @@ def test_help_and_resume_arguments():
     assert parser.parse_args(["chat", "--resume", "abc"]).resume == "abc"
     assert not parser.parse_args(["chat"]).sandbox
     assert parser.parse_args(["status", "--sandbox"]).sandbox
+    assert parser.parse_args(["chat", "--sandbox", "--sandbox-image", "project:dev"]).sandbox_image == "project:dev"
 
 
 async def test_switch_restores_saved_mode_config_and_releases_lock(tmp_path, monkeypatch):

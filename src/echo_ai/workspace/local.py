@@ -5,10 +5,12 @@ import json
 import os
 import shutil
 import signal
+import subprocess
 import sys
+import uuid
 from pathlib import Path
 
-from echo_ai.workspace.sandbox import Sandbox, _copy_repository
+from echo_ai.workspace.sandbox import Sandbox, _copy_repository, _git, _git_env
 
 
 class LocalWorkspace(Sandbox):
@@ -21,8 +23,14 @@ class LocalWorkspace(Sandbox):
 
     @classmethod
     def create(cls, repo, state_dir, config=None):
-        baseline = Sandbox.create(repo, state_dir, config)
-        return cls(repo, baseline.workspace.parent, baseline.config)
+        state_dir = Path(state_dir).resolve()
+        workspace = state_dir / uuid.uuid4().hex / "workspace"
+        workspace.mkdir(parents=True)
+        _git(workspace, "init", "--quiet")
+        _git(workspace, "-c", "user.name=Echo", "-c", "user.email=echo@localhost",
+             "commit", "--quiet", "--allow-empty", "-m", "Empty local baseline")
+        (workspace.parent / "partial-baseline").write_text("Agent file edits only\n")
+        return cls(repo, workspace.parent, config)
 
     @classmethod
     def resume(cls, workspace, state_path, config=None):
@@ -88,8 +96,54 @@ class LocalWorkspace(Sandbox):
             await asyncio.gather(process.stdout.read(), process.wait())
 
     def diff(self):
+        if (self.state_path / "partial-baseline").exists():
+            raise ValueError(
+                "/diff all is unavailable for this local session: no full session-start "
+                "snapshot was taken. Use /diff for recorded agent edits."
+            )
+        snapshot = self._refresh_snapshot()
+        return Sandbox(snapshot, self.config).diff()
+
+    def checkpoint(self, path):
+        snapshot = self.state_path / "workspace"
+        relative = self._recordable_path(path)
+        if relative is None:
+            raise ValueError(f"Cannot checkpoint path: {path}")
+        source, target = self.workspace / relative, snapshot / relative
+        if source.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            _git(snapshot, "add", "-f", "--", str(relative))
+        else:
+            target.unlink(missing_ok=True)
+            _git(snapshot, "rm", "--cached", "--ignore-unmatch", "--", str(relative))
+        tree = _git(snapshot, "write-tree").strip()
+        commit = _git(
+            snapshot, "-c", "user.name=Echo", "-c", "user.email=echo@localhost",
+            "commit-tree", tree, "-m", "Echo local file checkpoint",
+        ).strip()
+        _git(snapshot, "update-ref", f"refs/echo/checkpoints/{uuid.uuid4().hex}", commit)
+        return commit
+
+
+    def _refresh_snapshot(self):
         snapshot = self.state_path / "workspace"
         shutil.rmtree(snapshot)
         snapshot.mkdir()
         _copy_repository(self.workspace, snapshot, self.config.max_workspace_bytes)
-        return Sandbox(snapshot, self.config).diff()
+        return snapshot
+
+    def checkpoint_diff(self, before, after):
+        return Sandbox(self.state_path / "workspace", self.config).checkpoint_diff(before, after)
+
+    def checkout_id(self):
+        def git(*args):
+            result = subprocess.run(
+                ["git", "-C", str(self.workspace), *args],
+                env=_git_env(), capture_output=True, text=True, check=False,
+            )
+            return result.stdout.strip() if result.returncode == 0 else ""
+
+        return "|".join((git("rev-parse", "--show-toplevel"),
+                         git("symbolic-ref", "-q", "HEAD"),
+                         git("rev-parse", "--verify", "HEAD")))

@@ -29,21 +29,28 @@ def local(tmp_path):
 async def test_local_tools_diff_and_resume_preserve_user_index(local):
     index = (local.workspace / ".git/index").read_bytes()
     head = git(local.workspace, "symbolic-ref", "HEAD")
-    assert local.diff() == ""
+    with pytest.raises(ValueError, match="/diff all is unavailable"):
+        local.diff()
+    before = local.checkpoint("file.txt")
     result = await local.execute(
         "edit", {"path": "file.txt", "old": "user edit", "new": "agent edit"}
     )
     assert "error" not in result
     assert (local.workspace / "file.txt").read_text() == "agent edit\n"
+    after = local.checkpoint("file.txt")
+    patch = local.checkpoint_diff(before, after)
+    assert "-user edit" in patch and "+agent edit" in patch
+    assert local.can_checkpoint("added.txt")
     await local.execute("write", {"path": "added.txt", "content": "new\n"})
     result = await local.execute("bash", {"command": "pwd"})
     assert result["output"].strip() == str(local.workspace)
-    patch = local.diff()
-    assert "-user edit" in patch and "+agent edit" in patch and "+new" in patch
+    assert local.checkpoint_diff(after, local.checkpoint("added.txt")).find("+new") >= 0
     assert (local.workspace / ".git/index").read_bytes() == index
     assert git(local.workspace, "symbolic-ref", "HEAD") == head
     resumed = LocalWorkspace.resume(local.workspace, local.state_path)
-    assert resumed.mode == "local" and resumed.diff() == patch
+    assert resumed.mode == "local"
+    with pytest.raises(ValueError, match="/diff all is unavailable"):
+        resumed.diff()
     assert "agent edit" in (await resumed.execute("read", {"path": "file.txt"}))["output"]
     assert "error" in await local.execute("read", {"path": "../outside"})
     await resumed.close()
@@ -71,6 +78,42 @@ async def test_local_timeout_cancel_output_and_background_cleanup(local):
     await asyncio.sleep(0.3)
     assert not (local.workspace / "background").exists()
     assert (await local.execute("bash", {"command": "echo alive"}))["exit_code"] == 0
+
+
+def test_create_without_git_repository_snapshots_with_ignore_rules(tmp_path):
+    from echo_ai.workspace.sandbox import Sandbox
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "app.py").write_text("print('hi')\n")
+    (plain / ".gitignore").write_text("cache/\nsecret\n")
+    (plain / "cache").mkdir()
+    (plain / "cache" / "junk.bin").write_text("x" * 1000)
+    (plain / "secret").write_text("do not copy")
+    (plain / "escape").symlink_to("/etc/passwd")
+    instance = Sandbox.create(plain, tmp_path / "sessions")
+    assert (instance.workspace / "app.py").read_text() == "print('hi')\n"
+    assert not (instance.workspace / "secret").exists()
+    assert not (instance.workspace / "cache").exists()
+    assert not (instance.workspace / "escape").exists()
+    assert instance.diff() == ""
+    asyncio.run(instance.close())
+
+
+def test_local_non_git_directory_does_not_require_full_snapshot(tmp_path):
+    from echo_ai.config import Config
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "large.bin").write_bytes(b"12345")
+    (plain / "code.py").write_text("before\n")
+    local = LocalWorkspace.create(plain, tmp_path / "sessions", Config(max_workspace_bytes=4))
+    assert local.workspace == plain
+    before = local.checkpoint("code.py")
+    (plain / "code.py").write_text("after\n")
+    after = local.checkpoint("code.py")
+    assert "+after" in local.checkpoint_diff(before, after)
+    assert not (local.state_path / "workspace" / "large.bin").exists()
 
 
 def test_local_sessions_for_same_checkout_share_lock(local, tmp_path):

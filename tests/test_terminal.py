@@ -322,8 +322,8 @@ async def test_help_and_formatted_status(chat):
     assert "Session status" in "\n".join("".join(p[1] for p in line) for line in rendered)
 
 
-@pytest.mark.parametrize("mode,label", [("local", "host checkout"), ("sandbox", "sandbox copy")])
-async def test_diff_shows_file_summary_and_literal_patch(chat, mode, label):
+@pytest.mark.parametrize("mode", ["local", "sandbox"])
+async def test_diff_shows_file_summary_and_literal_patch(chat, mode):
     patch = (
         "diff --git a/code.py b/code.py\n"
         "--- a/code.py\n+++ b/code.py\n@@ -1 +1 @@\n-old\n+new\n"
@@ -331,16 +331,26 @@ async def test_diff_shows_file_summary_and_literal_patch(chat, mode, label):
         "--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+created\n"
     )
     chat.agent.sandbox.mode = mode
-    chat.agent.sandbox.diff = lambda: patch
+    chat.agent.store = SimpleNamespace(active_tool_changes=lambda _: [{"patch": patch}])
     await chat.submit("/diff")
     entry = chat.selected
     assert entry not in chat.entries
     rendered = "\n".join("".join(part[1] for part in line) for line in entry.markdown_lines(80))
-    assert f"Current {label} vs. session start" in rendered
+    assert "Agent edit and write changes" in rendered
     assert "Modified code.py" in rendered
     assert "Added    new.txt" in rendered
     assert "-old" in rendered and "+new" in rendered
     assert entry.text == patch
+
+
+async def test_diff_shows_only_recorded_agent_changes(chat):
+    patch = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-a\n+b\n"
+    chat.agent.sandbox.mode = "local"
+    chat.agent.store = SimpleNamespace(active_tool_changes=lambda _: [{"patch": patch}])
+    chat.agent.sandbox.diff = lambda: pytest.fail("agent diff should not use live workspace diff")
+    await chat.submit("/diff")
+    assert chat.selected.text == patch
+    assert "Agent edit and write changes" in "\n".join(lines(chat.details))
 
 
 async def test_session_list_switch_and_restored_conversation(chat, tmp_path, monkeypatch):

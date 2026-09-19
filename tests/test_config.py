@@ -22,6 +22,7 @@ def test_yaml_and_environment_precedence(clean_config, monkeypatch):
         "local-model:\n  reasoning_enabled: false\n  context_tokens: 32000\n  max_tokens: 4000\n"
         "  temperature: 0.2\n  max_context_chars: null\n"
         "agent:\n  max_steps: 12\nsandbox:\n  max_workspace_bytes: 1024\n"
+        "  sandbox_image: project-sandbox:local\n"
         "tools:\n  read:\n    max_lines: 300\n  edit:\n    max_bytes: 2048\n"
     )
     (clean_config / ".env").write_text("ECHO_TEMPERATURE=0.5\n")
@@ -33,10 +34,13 @@ def test_yaml_and_environment_precedence(clean_config, monkeypatch):
     assert config.temperature == 0.5
     assert config.max_steps == 12
     assert config.max_workspace_bytes == 1024
+    assert config.sandbox_image == "project-sandbox:local"
     assert config.read_max_lines == 300
     assert config.max_edit_bytes == 2048
     monkeypatch.setenv("ECHO_REASONING_ENABLED", "true")
     assert Config.from_env().reasoning_enabled
+    monkeypatch.setenv("ECHO_SANDBOX_IMAGE", "override:local")
+    assert Config.from_env().sandbox_image == "override:local"
     monkeypatch.setenv("ECHO_REASONING_ENABLED", "nope")
     with pytest.raises(ValueError, match="ECHO_REASONING_ENABLED"):
         Config.from_env()

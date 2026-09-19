@@ -38,6 +38,7 @@ class RuntimeSettings:
     sandbox_cpus: float = 2.0
     sandbox_file_bytes: int = 64 * 1024 * 1024
     sandbox_tmp_bytes: int = 128 * 1024 * 1024
+    sandbox_image: str = "echo-ai-sandbox:local"
 
     def __post_init__(self):
         for field in fields(self):
@@ -53,6 +54,8 @@ class RuntimeSettings:
                 raise ValueError(f"Invalid type for {field.name}")
         if not self.model.strip() or not self.provider.strip():
             raise ValueError("model and provider must not be empty")
+        if not self.sandbox_image.strip():
+            raise ValueError("sandbox_image must not be empty")
         if self.provider == "hosted_vllm" and not self.base_url.strip():
             raise ValueError("base_url must not be empty for hosted_vllm")
         if self.request_format not in {"vllm", "qwen", "standard"}:

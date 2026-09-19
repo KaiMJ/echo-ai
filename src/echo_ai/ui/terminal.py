@@ -41,6 +41,7 @@ from rich.text import Text
 from rich.theme import Theme as RichTheme
 
 from echo_ai.config import load_theme
+from echo_ai.runtime.revisions import apply_sandbox, move_turn
 from echo_ai.ui.commands import (
     NEW_SESSION,
     CommandCompleter,
@@ -78,10 +79,9 @@ def key_highlights(value, width):
     ]
 
 
-def diff_renderable(patch, mode):
+def diff_renderable(patch):
     """Show a compact file list above the unmodified session patch."""
-    label = "host checkout" if mode == "local" else "sandbox copy"
-    heading = Text(f"Current {label} vs. session start", style="bold")
+    heading = Text("Agent edit and write changes", style="bold")
     files = []
     current = None
     for line in patch.splitlines():
@@ -892,7 +892,8 @@ class TerminalChat:
                 elif kind == "tool_output":
                     entry.text += safe_text(value)
                 else:
-                    parts = [str(value[k]) for k in ("error", "output", "findings") if value.get(k)]
+                    parts = [str(value[k]) for k in ("error", "output", "findings", "undo_note")
+                             if value.get(k)]
                     entry.text = safe_text(
                         "\n\n".join(parts) if parts else json.dumps(value, indent=2)
                     )
@@ -963,19 +964,45 @@ class TerminalChat:
             return
         if text == "/diff":
             try:
-                patch = await asyncio.to_thread(self.agent.sandbox.diff)
+                patch = "\n".join(
+                    item["patch"] for item in
+                    self.agent.store.active_tool_changes(self.agent.session_id)
+                    if item["patch"]
+                )
                 self.open_details(
                     Entry(
                         "notice",
                         "Changes",
-                        patch if patch.strip() else "No changes yet.",
-                        renderable=diff_renderable(patch, self.agent.sandbox.mode)
+                        patch if patch.strip() else "No recorded agent changes.",
+                        renderable=diff_renderable(patch)
                         if patch.strip()
                         else None,
                     )
                 )
             except (RuntimeError, ValueError, OSError) as error:
                 self.add("notice", "Error", str(error))
+            return
+        if text in {"/undo", "/undo force", "/redo", "/redo force"}:
+            try:
+                action, *options = text[1:].split()
+                paths = await move_turn(self.agent, action, force=bool(options))
+                self.load_history(clear=True)
+                self.open_details(Entry(
+                    "notice", action.capitalize(),
+                    f"Conversation branch switched. Files changed: {', '.join(paths) or '(none)'}."
+                ))
+            except (RuntimeError, ValueError, OSError) as error:
+                self.open_details(Entry("notice", "Restore conflict", str(error)))
+            return
+        if text in {"/apply", "/apply force"}:
+            try:
+                paths = await apply_sandbox(self.agent, force=text.endswith(" force"))
+                self.open_details(Entry(
+                    "notice", "Applied sandbox changes",
+                    ", ".join(paths) or "No file changes to apply.",
+                ))
+            except (RuntimeError, ValueError, OSError) as error:
+                self.open_details(Entry("notice", "Apply conflict", str(error)))
             return
         if text.startswith("/"):
             self.add("notice", "Unknown command", "Use /help.")
@@ -1000,7 +1027,9 @@ class TerminalChat:
                 )
             self.app.invalidate()
 
-    async def run(self):
+    def load_history(self, *, clear=False):
+        if clear:
+            self.entries.clear()
         if hasattr(self.agent, "store"):
             for message in self.agent.store.messages(self.agent.session_id):
                 if message["role"] in {"user", "assistant"} and message.get("content"):
@@ -1008,6 +1037,9 @@ class TerminalChat:
                     self.add(
                         "user" if user else "text", "You" if user else "Echo", message["content"]
                     )
+
+    async def run(self):
+        self.load_history()
         self.renderer.event_handler = self.on_event
         try:
             return await self.app.run_async()

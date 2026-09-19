@@ -9,7 +9,7 @@ import signal
 import subprocess
 import sys
 from contextlib import ExitStack
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import httpx
@@ -23,6 +23,7 @@ from echo_ai.config import Config, load_theme, state_dir
 from echo_ai.runtime.agent import Agent
 from echo_ai.runtime.locking import WorkspaceBusy
 from echo_ai.runtime.model import Model
+from echo_ai.runtime.revisions import apply_sandbox, move_turn
 from echo_ai.runtime.store import Store, workspace_lock
 from echo_ai.ui.commands import (
     NEW_SESSION,
@@ -32,6 +33,7 @@ from echo_ai.ui.commands import (
     status_panel,
 )
 from echo_ai.ui.renderer import Renderer, safe_text
+from echo_ai.workspace.revisions import recover_restore
 
 console = Console(highlight=False)
 
@@ -120,7 +122,26 @@ async def chat(agent, root):
                 console.print(str(error), markup=False)
         elif text == "/diff":
             try:
-                console.print(safe_text(await asyncio.to_thread(agent.sandbox.diff)), markup=False)
+                patch = "\n".join(
+                    item["patch"] for item in agent.store.active_tool_changes(agent.session_id)
+                    if item["patch"]
+                )
+                console.print(safe_text(patch or "No changes yet."), markup=False)
+            except (RuntimeError, ValueError, OSError) as error:
+                console.print(str(error), markup=False)
+        elif text in {"/undo", "/undo force", "/redo", "/redo force"}:
+            try:
+                action, *options = text[1:].split()
+                paths = await move_turn(agent, action, force=bool(options))
+                console.print(
+                    f"Conversation branch switched. Files changed: {', '.join(paths) or '(none)'}."
+                )
+            except (RuntimeError, ValueError, OSError) as error:
+                console.print(str(error), markup=False)
+        elif text in {"/apply", "/apply force"}:
+            try:
+                paths = await apply_sandbox(agent, force=text.endswith(" force"))
+                console.print(f"Applied sandbox changes: {', '.join(paths) or '(none)'}")
             except (RuntimeError, ValueError, OSError) as error:
                 console.print(str(error), markup=False)
         elif text == "/status":
@@ -136,7 +157,7 @@ async def doctor(config, *, sandbox=False):
     if sandbox:
         for label, command in (
             ("Docker daemon", ["docker", "info"]),
-            ("Sandbox image", ["docker", "image", "inspect", "echo-ai-sandbox:local"]),
+            ("Sandbox image", ["docker", "image", "inspect", config.sandbox_image]),
         ):
             try:
                 result = await asyncio.to_thread(
@@ -244,6 +265,10 @@ async def execute(args):
     from echo_ai.workspace.sandbox import Sandbox
 
     config = Config.from_env()
+    if getattr(args, "sandbox_image", None):
+        if not getattr(args, "sandbox", False):
+            raise ValueError("--sandbox-image requires --sandbox")
+        config = replace(config, sandbox_image=args.sandbox_image)
     if args.command == "config":
         path = Path(os.getenv("ECHO_CONFIG_FILE", "echo.yaml")).expanduser().resolve()
         console.print(f"Config file: {path}", markup=False)
@@ -277,9 +302,10 @@ async def execute(args):
             )
             return 0
         pointer = getattr(args, "session", None) or getattr(args, "resume", None)
-        if pointer and getattr(args, "sandbox", False):
-            raise ValueError("Resumed sessions keep their saved mode; omit --sandbox.")
+        if pointer and (getattr(args, "sandbox", False) or getattr(args, "sandbox_image", None)):
+            raise ValueError("Resumed sessions keep their saved mode and image; omit --sandbox and --sandbox-image.")
         repo = Path(getattr(args, "repo", ".")).resolve()
+        checkout = await asyncio.to_thread(LocalWorkspace(repo, root, config).checkout_id)
         use_sandbox = getattr(args, "sandbox", False)
         fallback = None
         while True:
@@ -298,6 +324,7 @@ async def execute(args):
                     await acquire_session_lock(
                         locks, sandbox, root, interactive=interactive, handed_off=handed_off
                     )
+                    await asyncio.to_thread(recover_restore, sandbox, store.active_head(key))
                 except (RuntimeError, ValueError, OSError) as error:
                     if fallback is None:
                         raise
@@ -313,6 +340,8 @@ async def execute(args):
                 reused = False
                 if interactive:
                     for candidate in store.empty_sessions(repo, backend.mode):
+                        if candidate["checkout"] and candidate["checkout"] != checkout:
+                            continue
                         try:
                             if backend is LocalWorkspace:
                                 sandbox = backend.resume(
@@ -355,13 +384,16 @@ async def execute(args):
                         repo=repo,
                         mode=sandbox.mode,
                         state_path=getattr(sandbox, "state_path", None),
+                        checkout=checkout,
                     )
                 child = False
             if args.command == "diff":
-                patch = await asyncio.to_thread(sandbox.diff)
+                patch = "\n".join(
+                    item["patch"] for item in store.active_tool_changes(key) if item["patch"]
+                )
                 if args.output:
                     args.output.write_text(patch)
-                    console.print(f"Patch saved: {args.output}", markup=False)
+                    console.print(f"Change history saved: {args.output}", markup=False)
                 else:
                     print(safe_text(patch))
                 return 0
@@ -438,6 +470,7 @@ def build_parser():
         p = sub.add_parser(command, help=help_)
         p.add_argument("--repo", default=".", help="Repository path (default: current directory)")
         p.add_argument("--sandbox", action="store_true", help="Use an isolated Docker workspace")
+        p.add_argument("--sandbox-image", help="Docker image for a new sandbox session")
         if command == "run":
             p.add_argument("task", help="Task to execute")
         else:
@@ -451,9 +484,9 @@ def build_parser():
     p = sub.add_parser("resume", help="Resume a saved session (also: chat --resume)")
     p.add_argument("session", help="Session ID, unique prefix, or latest")
     p.add_argument("--repo", default=".", help="Repository used to resolve latest")
-    p = sub.add_parser("diff", help="Show changes since a session started")
+    p = sub.add_parser("diff", help="Show changes from agent edit and write tools")
     p.add_argument("session", help="Session ID or unique prefix")
-    p.add_argument("--output", type=Path, help="Save an unmodified patch")
+    p.add_argument("--output", type=Path, help="Save recorded change history (not one applyable patch)")
     p = sub.add_parser("sessions", help="List recent sessions for this repository")
     p.add_argument("--repo", default=".", help="Repository to list")
     p.add_argument(

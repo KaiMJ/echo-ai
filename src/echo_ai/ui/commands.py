@@ -28,7 +28,10 @@ COMMANDS = {
     "/status": "Show session, execution mode, and token usage",
     "/sessions": "List sessions for this repository",
     "/sessions ID": "Switch to a session (short IDs or latest accepted)",
-    "/diff": "Show changes since this session started",
+    "/diff": "Show changes from agent edit and write tools",
+    "/undo": "Undo the latest completed turn and its file changes",
+    "/redo": "Redo the last undone turn",
+    "/apply": "Apply sandbox agent edits to the source checkout",
     "/exit": "Save and exit",
 }
 

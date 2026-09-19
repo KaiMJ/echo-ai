@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -56,26 +57,66 @@ def _workspace_size(workspace: Path, max_bytes: int) -> int:
     return size
 
 
+def _list_files(repo: Path) -> bytes:
+    probe = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--git-dir"],
+        env=_git_env(),
+        capture_output=True,
+        check=False,
+    )
+    if probe.returncode == 0:
+        return subprocess.check_output(
+            [
+                "git",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-C",
+                str(repo),
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+            ],
+            env=_git_env(),
+        )
+    # Non-Git directories: list with a throwaway index so Git's .gitignore
+    # rules still apply, without writing anything into the user's directory.
+    with tempfile.TemporaryDirectory(prefix="echo-scan-") as tmp:
+        git_dir = Path(tmp) / ".git"
+        subprocess.check_output(
+            ["git", "-c", "core.hooksPath=/dev/null", "init", "--quiet", str(tmp)],
+            env=_git_env(),
+        )
+        return subprocess.check_output(
+            [
+                "git",
+                "--git-dir",
+                str(git_dir),
+                "--work-tree",
+                str(repo),
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.excludesFile=/dev/null",
+                "ls-files",
+                "-z",
+                "--others",
+                "--exclude-standard",
+            ],
+            env=_git_env(),
+        )
+
+
 def _copy_repository(repo: Path, workspace: Path, max_bytes: int) -> None:
     # Git's ignore rules exclude virtualenvs, local utilities, and secrets such
-    # as ignored .env files. Non-Git directories deliberately require setup.
-    raw = subprocess.check_output(
-        [
-            "git",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-C",
-            str(repo),
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ],
-        env=_git_env(),
-    )
+    # as ignored .env files. Non-Git directories use the same rules via a
+    # throwaway index.
+    raw = _list_files(repo)
     total = 0
     for name in set(os.fsdecode(raw).split("\0")) - {""}:
         relative = Path(name)
@@ -197,7 +238,7 @@ class Sandbox:
                     )
                 }
             ),
-            IMAGE,
+            self.config.sandbox_image,
         )
         if code:
             await self._docker("rm", "--force", name)
@@ -315,5 +356,59 @@ class Sandbox:
             "--no-ext-diff",
             "--no-textconv",
             "HEAD",
+            "--",
+        )
+
+    def can_checkpoint(self, path):
+        return self._recordable_path(path) is not None
+
+    def _recordable_path(self, path):
+        source = self.workspace / path
+        resolved = source.resolve()
+        if not resolved.is_relative_to(self.workspace):
+            return None
+        relative = resolved.relative_to(self.workspace)
+        if not relative.parts or any(
+            part in {".git", ".ssh", ".aws", ".gnupg", ".env"}
+            for part in relative.parts
+        ):
+            return None
+        if source.is_symlink() or resolved.is_dir():
+            return None
+        return relative
+
+    def checkpoint(self, path=None) -> str:
+        """Persist a workspace tree without moving the frozen baseline HEAD."""
+        if path is None:
+            self.check_size()
+            _git(self.workspace, "add", "--all")
+        else:
+            relative = self._recordable_path(path)
+            if relative is None:
+                raise ValueError(f"Cannot checkpoint path: {path}")
+            if (self.workspace / relative).is_file():
+                _git(self.workspace, "add", "-f", "--", str(relative))
+            else:
+                _git(self.workspace, "rm", "--cached", "--ignore-unmatch", "--",
+                     str(relative))
+        tree = _git(self.workspace, "write-tree").strip()
+        commit = _git(
+            self.workspace,
+            "-c", "user.name=Echo",
+            "-c", "user.email=echo@localhost",
+            "commit-tree", tree, "-m", "Echo tool checkpoint",
+        ).strip()
+        _git(self.workspace, "update-ref", f"refs/echo/checkpoints/{uuid.uuid4().hex}", commit)
+        return commit
+
+    def checkpoint_diff(self, before: str, after: str) -> str:
+        return _git(
+            self.workspace,
+            "diff",
+            "--binary",
+            "--no-ext-diff",
+            "--no-textconv",
+            before,
+            after,
             "--",
         )
