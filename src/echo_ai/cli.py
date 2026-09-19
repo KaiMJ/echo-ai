@@ -17,9 +17,11 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Console
+from rich.prompt import Confirm
 
 from echo_ai.config import Config, load_theme, state_dir
 from echo_ai.runtime.agent import Agent
+from echo_ai.runtime.locking import WorkspaceBusy
 from echo_ai.runtime.model import Model
 from echo_ai.runtime.store import Store, workspace_lock
 from echo_ai.ui.commands import (
@@ -178,6 +180,65 @@ def session_lock(sandbox, root):
     return workspace_lock(sandbox.workspace, locks / (name + ".lock"))
 
 
+async def acquire_session_lock(locks, sandbox, root, *, interactive, handed_off, timeout=10):
+    try:
+        lease = locks.enter_context(session_lock(sandbox, root))
+    except WorkspaceBusy as busy:
+        if not interactive or not sys.stdin.isatty():
+            raise
+        if not busy.owner:
+            raise RuntimeError(
+                "This workspace is held by an older or unidentified process. "
+                "Close that Echo process manually, then resume."
+            ) from busy
+        if not Confirm.ask(
+            f"Echo process {busy.owner['pid']} has this workspace open. "
+            "Close the other process and continue here?",
+            default=False,
+            console=console,
+        ):
+            raise RuntimeError("Session left open in the other Echo process.") from busy
+        try:
+            lease = locks.enter_context(session_lock(sandbox, root))
+        except WorkspaceBusy as current:
+            if current.owner != busy.owner:
+                raise RuntimeError("Workspace owner changed. Try resuming again.") from current
+            request = busy.request_close()
+            console.print("Waiting for the other Echo process to close…", style="dim")
+            try:
+                deadline = asyncio.get_running_loop().time() + timeout
+                while True:
+                    try:
+                        lease = locks.enter_context(session_lock(sandbox, root))
+                        break
+                    except WorkspaceBusy as current:
+                        if current.owner != busy.owner:
+                            raise RuntimeError(
+                                "Workspace owner changed. Try resuming again."
+                            ) from current
+                        if asyncio.get_running_loop().time() >= deadline:
+                            raise RuntimeError(
+                                "The other Echo process did not close in time. "
+                                "Close it manually, then resume."
+                            ) from current
+                        await asyncio.sleep(0.1)
+            finally:
+                request.remove_request()
+
+    owner_task = asyncio.current_task()
+
+    async def watch_handoff():
+        while True:
+            await asyncio.sleep(0.1)
+            if lease.close_requested():
+                handed_off.set()
+                owner_task.cancel()
+                return
+
+    watcher = asyncio.create_task(watch_handoff())
+    locks.callback(watcher.cancel)
+
+
 async def execute(args):
     from echo_ai.workspace.local import LocalWorkspace
     from echo_ai.workspace.sandbox import Sandbox
@@ -202,6 +263,8 @@ async def execute(args):
     store = Store(root / "sessions.sqlite3")
     sandbox = None
     locks = ExitStack()
+    handed_off = asyncio.Event()
+    interactive = args.command in {"chat", "resume"}
     try:
         if args.command == "sessions":
             console.print(
@@ -232,7 +295,9 @@ async def execute(args):
                         sandbox = Sandbox.resume(Path(session["workspace"]), config)
                     key = session["id"]
                     child = session["parent_id"] is not None
-                    locks.enter_context(session_lock(sandbox, root))
+                    await acquire_session_lock(
+                        locks, sandbox, root, interactive=interactive, handed_off=handed_off
+                    )
                 except (RuntimeError, ValueError, OSError) as error:
                     if fallback is None:
                         raise
@@ -247,10 +312,18 @@ async def execute(args):
                 backend = Sandbox if use_sandbox else LocalWorkspace
                 # Lock the checkout before taking the initial local snapshot.
                 if backend is LocalWorkspace:
-                    locks.enter_context(session_lock(LocalWorkspace(repo, root, config), root))
+                    await acquire_session_lock(
+                        locks,
+                        LocalWorkspace(repo, root, config),
+                        root,
+                        interactive=interactive,
+                        handed_off=handed_off,
+                    )
                 sandbox = await asyncio.to_thread(backend.create, repo, root, config)
                 if backend is Sandbox:
-                    locks.enter_context(session_lock(sandbox, root))
+                    await acquire_session_lock(
+                        locks, sandbox, root, interactive=interactive, handed_off=handed_off
+                    )
                 key = store.create(
                     sandbox.workspace,
                     asdict(config),
@@ -290,6 +363,11 @@ async def execute(args):
                 continue
             if not pointer:
                 return 0
+    except asyncio.CancelledError:
+        if not handed_off.is_set():
+            raise
+        console.print("Session closed for handoff to another Echo process.", style="dim")
+        return 0
     finally:
         try:
             if sandbox is not None:

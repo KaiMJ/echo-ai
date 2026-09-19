@@ -37,6 +37,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.syntax import Syntax
 from rich.text import Text
+from rich.theme import Theme as RichTheme
 
 from echo_ai.config import load_theme
 from echo_ai.ui.commands import (
@@ -54,6 +55,9 @@ from echo_ai.ui.renderer import safe_text
 # the CSI-u / modifyOtherKeys sequences terminals can forward for Ctrl+Shift+C.
 for sequence in ("\x1b[99;6u", "\x1b[67;6u", "\x1b[27;6;99~", "\x1b[27;6;67~"):
     ANSI_SEQUENCES[sequence] = Keys.F24
+# Keep Ctrl+U distinct: only explicitly shifted sequences clear the entire draft.
+for sequence in ("\x1b[117;6u", "\x1b[85;6u", "\x1b[27;6;117~", "\x1b[27;6;85~"):
+    ANSI_SEQUENCES[sequence] = Keys.F23
 
 
 def fit_text(value, width):
@@ -65,7 +69,7 @@ def fit_text(value, width):
 
 def key_highlights(value, width):
     text = fit_text(value, width)
-    keys = r"(Ctrl\+Shift\+C|Ctrl-End|Ctrl\+[cCdJ]|Alt\+[dy]|PgUp/PgDn|Enter|Esc|F[23])"
+    keys = r"(Ctrl\+Shift\+[CU]|Ctrl-End|Ctrl\+[cCdJ]|Alt\+[dy]|PgUp/PgDn|Enter|Esc|F[23])"
     return [
         ("class:key" if re.fullmatch(keys, part) else "class:muted", part)
         for part in re.split(keys, text)
@@ -102,6 +106,7 @@ class Entry:
                 force_terminal=True,
                 color_system="truecolor",
                 highlight=False,
+                theme=RichTheme({"markdown.code": "bold", "markdown.code_block": "none"}),
             )
             if self.renderable is not None:
                 console.print(self.renderable)
@@ -112,7 +117,13 @@ class Entry:
                 if self.detail:
                     console.print(Text("Arguments", style="dim"))
                     console.print(
-                        Syntax(self.detail, "json", word_wrap=True, background_color="default")
+                        Syntax(
+                            self.detail,
+                            "json",
+                            word_wrap=True,
+                            theme="ansi_light",
+                            background_color="default",
+                        )
                     )
                     console.print()
                 console.print(Text("Output", style="dim"))
@@ -121,19 +132,25 @@ class Entry:
                     # Read results prefix each source line with its original line number.
                     body = re.sub(r"(?m)^\d+: ", "", body)
                     if PurePath(self.path).suffix.lower() in {".md", ".markdown", ".mdown"}:
-                        console.print(Markdown(body))
+                        console.print(Markdown(body, code_theme="ansi_light"))
                     else:
                         lexer = Syntax.guess_lexer(self.path, body)
                         console.print(
-                            Syntax(body, lexer, word_wrap=True, background_color="default")
+                            Syntax(
+                                body,
+                                lexer,
+                                word_wrap=True,
+                                theme="ansi_light",
+                                background_color="default",
+                            )
                         )
                 elif self.tool == "delegate":
-                    console.print(Markdown(body))
+                    console.print(Markdown(body, code_theme="ansi_light"))
                 else:
                     # Shell output, filenames, and search matches are literal text.
                     console.print(Text(body))
             else:
-                console.print(Markdown(source or "Waiting for output…"))
+                console.print(Markdown(source or "Waiting for output…", code_theme="ansi_light"))
             self.cache = list(split_lines(to_formatted_text(ANSI(output.getvalue()))))
             # Rich appends a newline; don't accumulate empty rows between entries.
             while self.cache and not any(fragment[1] for fragment in self.cache[-1]):
@@ -464,17 +481,12 @@ class TerminalChat:
 
         @keys.add("escape")
         def close(event):
-            control = self.details if self.selected else self.transcript
             if self.editor.buffer.complete_state is not None:
                 self.editor.buffer.cancel_completion()
-            elif control.selection_rows is not None:
-                control.clear_selection()
             elif self.copy_mode:
                 self.toggle_copy()
             elif self.selected:
                 self.close_details()
-            else:
-                self.editor.text = ""
 
         @keys.add("f2")
         @keys.add("escape", "d")
@@ -484,13 +496,21 @@ class TerminalChat:
             else:
                 self.latest_details()
 
-        @keys.add("c-c")
+        @keys.add("c-c", eager=True)
         def copy_latest(event):
-            self.copy_output()
+            if self.app.layout.has_focus(self.editor) and self.editor.buffer.selection_state:
+                # Extract from the immutable document without cutting the live buffer.
+                self.copy_text(self.editor.buffer.document.cut_selection()[1].text)
+            else:
+                self.copy_output()
 
         @keys.add("f24")
         def copy_all(event):
             self.copy_output(all_entries=True)
+
+        @keys.add("f23", filter=Condition(lambda: not self.selected and not self.copy_mode))
+        def clear_draft(event):
+            self.clear_input()
 
         @keys.add("f3")
         @keys.add("escape", "y")
@@ -654,18 +674,29 @@ class TerminalChat:
     def composer_hint(self):
         width = self.app.output.get_size().columns
         if self.copy_mode:
-            hint = "Esc resume · Select text with your terminal"
+            hint = "Select text · Cmd+C (Mac) / Ctrl+Shift+C (Linux) · Esc return"
         elif (self.details if self.selected else self.transcript).selected_text():
-            hint = "Ctrl+c  Copy selection    Ctrl+Shift+C  Copy conversation    Esc  Clear"
+            hint = "Ctrl+c  Copy    Click again to deselect"
         elif self.selected:
             hint = "Ctrl+c  Copy section    Esc  Close"
         else:
-            hint = "Enter  Send    Ctrl+J  New line"
+            hint = "Enter  Send    Ctrl+J  New line    Ctrl+c  Copy"
             if width >= 70:
                 hint += "    Ctrl+d  Stop" if self.busy else "    /help  Commands"
-            if self.busy and width >= 100:
-                hint += "    Draft while Echo works"
+        if self.editor.text and not self.selected and not self.copy_mode:
+            label = "  [Ctrl+Shift+U Clear input] "
+            return key_highlights(f"  {hint}", max(0, width - len(label))) + [
+                ("class:key underline", label, self.clear_input)
+            ]
         return key_highlights(f"  {hint}", width)
+
+    def clear_input(self, event=None):
+        if event is None or (
+            event.event_type == MouseEventType.MOUSE_UP and event.button == MouseButton.LEFT
+        ):
+            self.editor.text = ""
+            self.app.layout.focus(self.editor)
+            self.app.invalidate()
 
     def details_title(self):
         width = max(1, self.app.output.get_size().columns - 10)
@@ -681,11 +712,14 @@ class TerminalChat:
             "notice",
             "Commands · Esc close",
             "```text\n" + help_text() + "\n```\n\n"
-            "**Enter** Send · **Ctrl+J** New line · **Ctrl+c** Copy selection / latest answer\n\n"
-            "**Esc** Dismiss completion, selection, or details first; otherwise clear the draft.\n\n"
-            "**Ctrl+Shift+C** Copy conversation · **Ctrl+d** Stop / exit\n\n"
-            "Click a section or drag to select. Ctrl+Shift+C requires your terminal to forward "
-            "the shortcut (CSI-u or modifyOtherKeys).",
+            "**Enter** Send · **Ctrl+J** New line · **Esc** Close menu/details · **Ctrl+D** Stop/exit\n\n"
+            "- **Select:** Click a block or drag across text. Click a selected block again to deselect.\n"
+            "- **Copy:** Ctrl+C copies your selection, or the latest answer if nothing is selected. "
+            "Ctrl+Shift+C copies the whole conversation.\n"
+            "- **Paste:** Cmd+V on Mac; Ctrl+Shift+V on Linux.\n"
+            "- **Clear input:** Ctrl+Shift+U or click **Clear input**.\n\n"
+            "Copy shortcut not working? Press Alt+y, select text, and use your usual copy shortcut. "
+            "Press Esc to return.",
         )
 
     def add(self, kind, title, text="", **kwargs):

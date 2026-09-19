@@ -6,21 +6,24 @@ from dataclasses import dataclass, fields
 
 @dataclass(frozen=True)
 class Theme:
-    foreground: str = "#eeeeee"
+    foreground: str = "default"
+    input_foreground: str = "#eeeeee"
     accent: str = "#5fd7df"
-    muted: str = "#999999"
+    muted: str = "#767676"
     error: str = "#ff5f5f"
     warning: str = "#e5c07b"
     success: str = "#98c379"
     spinner: str = "#c678dd"
     input_background: str = "#262626"
     input_border: str = "#555555"
-    selection_background: str = "#555555"
+    selection_background: str = "#767676"
     selection_foreground: str = "#ffffff"
 
     def __post_init__(self):
         for field in fields(self):
             value = getattr(self, field.name)
+            if field.name == "foreground" and value == "default":
+                continue
             if not isinstance(value, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
                 raise ValueError(f"theme.{field.name} must be a quoted '#RRGGBB' color")
 
@@ -34,7 +37,7 @@ class Theme:
         return cls(**values)
 
     def styles(self):
-        composer = f"bg:{self.input_background} {self.foreground}"
+        composer = f"bg:{self.input_background} {self.input_foreground}"
         return {
             "": self.foreground,
             "heading": "bold",

@@ -183,3 +183,20 @@ def test_theme_custom_file(clean_config, monkeypatch):
     path.write_text('theme:\n  accent: "#123456"\n')
     monkeypatch.setenv("ECHO_CONFIG_FILE", str(path))
     assert load_theme().accent == "#123456"
+
+
+def test_default_theme_inherits_terminal_text_but_keeps_input_contrast():
+    from prompt_toolkit.styles import Style
+
+    from echo_ai.config.theme import Theme
+
+    theme = Theme()
+    style = Style.from_dict(theme.styles())
+    assert style.get_attrs_for_style_str("").color == "default"
+    assert style.get_attrs_for_style_str("").bgcolor == ""
+    composer = style.get_attrs_for_style_str("class:composer")
+    assert composer.color == "eeeeee" and composer.bgcolor == "262626"
+    custom = Theme(foreground="#101010", input_foreground="#abcdef")
+    assert (
+        Style.from_dict(custom.styles()).get_attrs_for_style_str("class:composer").color == "abcdef"
+    )

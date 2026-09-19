@@ -1,11 +1,13 @@
 """SQLite transcript and execution state. No side effects are replayed on resume."""
 
-import fcntl
 import json
 import sqlite3
 import uuid
-from contextlib import contextmanager
 from pathlib import Path
+
+from .locking import workspace_lock
+
+__all__ = ["Store", "workspace_lock"]
 
 
 class Store:
@@ -185,19 +187,3 @@ class Store:
 
     def close(self):
         self.db.close()
-
-
-@contextmanager
-def workspace_lock(workspace, lock_path=None):
-    """Only one CLI process may recover or change a workspace at a time."""
-    with (lock_path or workspace.parent / "workspace.lock").open("a") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise RuntimeError(
-                "This workspace is open in another Echo process. Close it first."
-            ) from error
-        try:
-            yield
-        finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)

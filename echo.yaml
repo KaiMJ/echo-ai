@@ -46,14 +46,15 @@ tools:
 # Interface colors. Quote hex values so YAML does not treat them as comments.
 # Applied on launch, including resumed sessions. Conversation rows stay unshaded.
 theme:
-  foreground: "#eeeeee"
+  foreground: "default" # Follow your terminal text color (light or dark).
+  input_foreground: "#eeeeee" # Paired with the dark input box.
   accent: "#5fd7df"
-  muted: "#999999"
+  muted: "#767676"
   error: "#ff5f5f"
   warning: "#e5c07b"
   success: "#98c379"
   spinner: "#c678dd"
   input_background: "#262626"
   input_border: "#555555"
-  selection_background: "#555555"
+  selection_background: "#767676"
   selection_foreground: "#ffffff"

@@ -453,10 +453,8 @@ async def test_typing_and_newline_while_streaming_and_slash_menu(tmp_path):
             await until(lambda: copied == ["Streaming answer"])
             assert instance.editor.text == "draft\nsecond" and instance.busy
             pipe.send_text("\x1b")
-            await until(lambda: instance.editor.text == "")
-            assert instance.busy
-            pipe.send_text("draft\nsecond")
-            await until(lambda: instance.editor.text == "draft\nsecond")
+            await asyncio.sleep(0.7)
+            assert instance.editor.text == "draft\nsecond" and instance.busy
             pipe.send_text("\x1b[99;6u")
             await until(lambda: len(copied) == 2)
             assert copied[-1] == 'user:\n"first"\n\necho:\n"Streaming answer"'
@@ -606,7 +604,7 @@ def test_user_bubble_border_is_not_copied(chat):
     assert control.selected_text() == entry.text
 
 
-def test_escape_dismisses_ui_before_clearing_draft(chat):
+def test_escape_dismisses_ui_without_clearing_draft_or_selection(chat):
     from prompt_toolkit.completion import Completion
     from prompt_toolkit.keys import Keys
 
@@ -621,12 +619,10 @@ def test_escape_dismisses_ui_before_clearing_draft(chat):
     chat.editor.text = "keep draft"
     chat.transcript.select_entry(entry)
     escape(None)
-    assert chat.transcript.selection_rows is None and chat.editor.text == "keep draft"
+    assert chat.transcript.selected_text() == "Answer" and chat.editor.text == "keep draft"
 
     chat.open_details(entry)
     chat.details.select_entry(entry)
-    escape(None)
-    assert chat.selected is entry and chat.editor.text == "keep draft"
     escape(None)
     assert chat.selected is None and chat.editor.text == "keep draft"
 
@@ -634,4 +630,106 @@ def test_escape_dismisses_ui_before_clearing_draft(chat):
     escape(None)
     assert not chat.copy_mode and chat.editor.text == "keep draft"
     escape(None)
+    assert chat.editor.text == "keep draft"
+
+
+def test_clear_input_button_and_copy_preserve_independent_state(chat):
+    from prompt_toolkit.keys import Keys
+
+    entry = chat.add("text", "Echo", "Answer")
+    chat.transcript.select_entry(entry)
+    chat.editor.text = "Draft\nsecond line"
+    copied = []
+    chat.copy_text = copied.append
+    copy = chat.app.key_bindings.get_bindings_for_keys((Keys.ControlC,))[-1]
+    assert copy.eager()
+    copy.handler(None)
+    copy.handler(None)
+    assert copied == ["Answer", "Answer"]
+    assert chat.editor.text == "Draft\nsecond line"
+    assert chat.transcript.selected_text() == "Answer"
+    hint = chat.composer_hint()
+    button = next(part for part in hint if "Clear input" in part[1])
+    button[2](MouseEvent(Point(0, 0), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset()))
     assert chat.editor.text == ""
+    assert chat.transcript.selected_text() == "Answer"
+
+
+def test_copy_from_editor_selection_does_not_cut_or_deselect(chat):
+    from prompt_toolkit.keys import Keys
+
+    chat.editor.text = "keep this draft"
+    chat.editor.buffer.cursor_position = 0
+    chat.editor.buffer.start_selection()
+    chat.editor.buffer.cursor_position = 4
+    copied = []
+    chat.copy_text = copied.append
+    chat.app.key_bindings.get_bindings_for_keys((Keys.ControlC,))[-1].handler(None)
+    assert copied == ["keep"]
+    assert chat.editor.text == "keep this draft"
+    assert chat.editor.buffer.selection_state is not None
+
+
+@pytest.mark.parametrize(
+    "sequence", ["\x1b[117;6u", "\x1b[85;6u", "\x1b[27;6;117~", "\x1b[27;6;85~"]
+)
+async def test_shift_ctrl_u_clears_draft_but_ctrl_u_keeps_line_editing(tmp_path, sequence):
+    import asyncio
+
+    from prompt_toolkit.input import create_pipe_input
+
+    async def until(predicate):
+        async with asyncio.timeout(3):
+            while not predicate():
+                await asyncio.sleep(0.01)
+
+    with create_pipe_input() as pipe:
+        instance = TerminalChat(
+            SimpleNamespace(session_id="test"),
+            tmp_path,
+            Renderer(Console(file=StringIO())),
+            input=pipe,
+            output=DummyOutput(),
+        )
+        entry = instance.add("text", "Echo", "Keep selected answer")
+        task = asyncio.create_task(instance.run())
+        try:
+            await until(lambda: instance.app.is_running)
+            instance.transcript.select_entry(entry)
+            pipe.send_text("first\nsecond")
+            await until(lambda: instance.editor.text == "first\nsecond")
+            pipe.send_text("\x15")  # Ctrl+U: delete only to the start of the current line.
+            await until(lambda: instance.editor.text == "first\n")
+            pipe.send_text("second")
+            await until(lambda: instance.editor.text == "first\nsecond")
+            assert "Ctrl+Shift+U" in "".join(p[1] for p in instance.composer_hint())
+            pipe.send_text(sequence)
+            await until(lambda: instance.editor.text == "")
+            assert instance.transcript.selected_text() == "Keep selected answer"
+        finally:
+            instance.app.exit()
+            await task
+
+
+def test_help_uses_actions_without_terminal_protocol_jargon(chat):
+    text = chat.help_entry().text
+    assert all(f"**{action}:**" in text for action in ("Select", "Copy", "Paste", "Clear input"))
+    assert "Ctrl+Shift+U" in text and "Clear input" in text
+    assert "CSI-u" not in text and "modifyOtherKeys" not in text
+    assert "Cmd+V" in text
+
+
+@pytest.mark.parametrize(
+    "kind,body,tool,path",
+    [
+        ("text", "Plain text with `inline code`", "", ""),
+        ("text", "```text\nplain_identifier\n```", "", ""),
+        ("tool", "1: plain_identifier", "read", "file.py"),
+    ],
+)
+def test_text_and_code_do_not_force_white_on_terminal_background(chat, kind, body, tool, path):
+    entry = chat.add(kind, "Echo", body, tool=tool, path=path, done=True)
+    fragments = [p for line in entry.markdown_lines(80) for p in line]
+    assert not any(
+        "ansiwhite" in p[0] or "ansibrightwhite" in p[0] or "bg:" in p[0] for p in fragments
+    )
