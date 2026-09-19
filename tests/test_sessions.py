@@ -47,3 +47,36 @@ def test_latest_is_repository_scoped_and_excludes_children(tmp_path):
     with pytest.raises(ValueError, match="Ambiguous"):
         store.resolve("")
     store.close()
+
+
+def test_empty_sessions_are_reusable_but_never_latest(tmp_path):
+    store = Store(tmp_path / "state.db")
+    try:
+        active = store.create(tmp_path, {}, repo=tmp_path)
+        store.add(active, {"role": "user", "content": "Actual work"})
+        empty = store.create(tmp_path, {}, repo=tmp_path)
+        old_updated = store.session(empty)["updated"]
+        store.create(tmp_path, {}, repo=tmp_path, mode="local")
+        store.create(tmp_path, {}, repo=tmp_path / "other")
+        assert store.resolve("latest", tmp_path)["id"] == active
+        assert [s["id"] for s in store.empty_sessions(tmp_path, "sandbox")] == [empty]
+        assert store.prepare_empty(empty, {"max_steps": 12})
+        assert store.session(empty)["updated"] == old_updated
+        assert json.loads(store.session(empty)["config"]) == {"max_steps": 12}
+        assert store.resolve(empty)["id"] == empty
+        store.start(empty)
+        assert not store.empty_sessions(tmp_path, "sandbox")
+        assert not store.prepare_empty(empty, {})
+        assert not store.prepare_empty(active, {})
+    finally:
+        store.close()
+
+
+def test_latest_without_activity_does_not_pick_empty_session(tmp_path):
+    store = Store(tmp_path / "state.db")
+    try:
+        store.create(tmp_path, {}, repo=tmp_path)
+        with pytest.raises(ValueError, match="No sessions with activity"):
+            store.resolve("latest", tmp_path)
+    finally:
+        store.close()

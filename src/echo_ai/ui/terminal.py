@@ -69,7 +69,7 @@ def fit_text(value, width):
 
 def key_highlights(value, width):
     text = fit_text(value, width)
-    keys = r"(Ctrl\+Shift\+[CU]|Ctrl-End|Ctrl\+[cCdJ]|Alt\+[dy]|PgUp/PgDn|Enter|Esc|F[23])"
+    keys = r"(Ctrl\+Shift\+[CU]|Ctrl-End|Ctrl\+[cCdDJ]|/help|Alt\+[dy]|PgUp/PgDn|Enter|Esc|F[23])"
     return [
         ("class:key" if re.fullmatch(keys, part) else "class:muted", part)
         for part in re.split(keys, text)
@@ -438,12 +438,14 @@ class TerminalChat:
         self.copy_selected = None
         self.copy_time = 0.0
         self.copy_status = ""
+        self.input_rows = 3
+        self.resize_drag = None
         self.transcript = TranscriptControl(self)
         self.details = TranscriptControl(self, popup=True)
         self.editor = TextArea(
             prompt="echo › ",
             multiline=True,
-            height=3,
+            height=self.input_height,
             history=FileHistory(str(root / "input-history")),
             completer=CommandCompleter(),
             read_only=Condition(lambda: self.copy_mode),
@@ -556,7 +558,7 @@ class TerminalChat:
                 VSplit(
                     [
                         Window(width=2),
-                        Frame(self.editor, style="class:composer-box"),
+                        Frame(self.editor, title="Drag to resize", style="class:composer-box"),
                         Window(width=2),
                     ]
                 ),
@@ -583,6 +585,7 @@ class TerminalChat:
             output=output,
             min_redraw_interval=0.016,
             refresh_interval=0.125,
+            after_render=self.install_resize_handlers,
             style=Style.from_dict(self.theme.styles()),
         )
 
@@ -593,6 +596,56 @@ class TerminalChat:
     @property
     def busy(self):
         return self.task is not None and not self.task.done()
+
+    def input_height(self):
+        if not hasattr(self, "app"):
+            return self.input_rows
+        return max(1, min(self.input_rows, self.app.output.get_size().rows - 8))
+
+    def install_resize_handlers(self, app):
+        """Capture dragging across panes, using terminal coordinates throughout."""
+        info = self.editor.window.render_info
+        if info is None or self.selected or self.copy_mode:
+            self.resize_drag = None
+            return
+        handlers = app.renderer.mouse_handlers
+        size = app.output.get_size()
+        if self.resize_drag is None:
+            handlers.set_mouse_handler_for_range(
+                2,
+                max(2, size.columns - 2),
+                info._y_offset - 1,
+                info._y_offset,
+                self.resize_input,
+            )
+        else:
+            for y in range(size.rows):
+                for x in range(size.columns):
+                    original = handlers.mouse_handlers[y][x]
+
+                    def capture(event, original=original):
+                        if self.resize_drag is not None:
+                            return self.resize_input(event)
+                        return original(event)
+
+                    handlers.mouse_handlers[y][x] = capture
+
+    def resize_input(self, event):
+        if event.event_type == MouseEventType.MOUSE_DOWN and event.button == MouseButton.LEFT:
+            self.resize_drag = (event.position.y, self.input_height())
+            self.install_resize_handlers(self.app)
+        elif self.resize_drag is not None and event.event_type in {
+            MouseEventType.MOUSE_MOVE,
+            MouseEventType.MOUSE_UP,
+        }:
+            start_y, start_height = self.resize_drag
+            maximum = max(1, self.app.output.get_size().rows - 8)
+            self.input_rows = max(1, min(maximum, start_height + start_y - event.position.y))
+            if event.event_type == MouseEventType.MOUSE_UP:
+                self.resize_drag = None
+            self.app.invalidate()
+        else:
+            return NotImplemented
 
     def status(self):
         if self.copy_mode:
@@ -674,21 +727,29 @@ class TerminalChat:
     def composer_hint(self):
         width = self.app.output.get_size().columns
         if self.copy_mode:
-            hint = "Select text · Cmd+C (Mac) / Ctrl+Shift+C (Linux) · Esc return"
+            items = ["Select text", "Cmd+C (Mac) / Ctrl+Shift+C (Linux)", "Esc Return"]
         elif (self.details if self.selected else self.transcript).selected_text():
-            hint = "Ctrl+c  Copy    Click again to deselect"
+            items = ["Ctrl+C Copy", "Click again to deselect"]
         elif self.selected:
-            hint = "Ctrl+c  Copy section    Esc  Close"
+            items = ["Ctrl+C Copy section", "Esc Close"]
         else:
-            hint = "Enter  Send    Ctrl+J  New line    Ctrl+c  Copy"
-            if width >= 70:
-                hint += "    Ctrl+d  Stop" if self.busy else "    /help  Commands"
-        if self.editor.text and not self.selected and not self.copy_mode:
-            label = "  [Ctrl+Shift+U Clear input] "
-            return key_highlights(f"  {hint}", max(0, width - len(label))) + [
-                ("class:key underline", label, self.clear_input)
-            ]
-        return key_highlights(f"  {hint}", width)
+            items = ["Enter Send", "Ctrl+J New line", "Ctrl+C Copy"]
+            items.append("Ctrl+D Stop" if self.busy else "/help Commands")
+        clear = bool(self.editor.text and not self.selected and not self.copy_mode)
+        label = "Ctrl+Shift+U Clear input" if width >= 60 else "Clear input"
+        reserved = len(label) + 3 if clear else 0
+        available = max(0, width - reserved - 2)
+        # Drop whole hints on narrow terminals instead of cutting through shortcuts.
+        while len(items) > 1 and len(" · ".join(items)) > available:
+            items.pop()
+        fragments = key_highlights("  " + " · ".join(items), max(0, width - reserved))
+        if clear:
+            fragments.append(("class:muted", " · "))
+            fragments.extend(
+                (style, text, self.clear_input)
+                for style, text in key_highlights(label, min(len(label), width))
+            )
+        return fragments
 
     def clear_input(self, event=None):
         if event is None or (
@@ -718,6 +779,7 @@ class TerminalChat:
             "Ctrl+Shift+C copies the whole conversation.\n"
             "- **Paste:** Cmd+V on Mac; Ctrl+Shift+V on Linux.\n"
             "- **Clear input:** Ctrl+Shift+U or click **Clear input**.\n\n"
+            "**Resize input:** Drag the top border of the input box up or down.\n\n"
             "Copy shortcut not working? Press Alt+y, select text, and use your usual copy shortcut. "
             "Press Esc to return.",
         )

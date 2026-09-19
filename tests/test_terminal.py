@@ -733,3 +733,58 @@ def test_text_and_code_do_not_force_white_on_terminal_background(chat, kind, bod
     assert not any(
         "ansiwhite" in p[0] or "ansibrightwhite" in p[0] or "bg:" in p[0] for p in fragments
     )
+
+
+async def test_drag_input_border_resizes_without_editing_or_selecting(tmp_path):
+    import asyncio
+
+    from prompt_toolkit.input import create_pipe_input
+
+    async def until(predicate):
+        async with asyncio.timeout(3):
+            while not predicate():
+                await asyncio.sleep(0.01)
+
+    with create_pipe_input() as pipe:
+        instance = TerminalChat(
+            SimpleNamespace(session_id="resize"),
+            tmp_path,
+            Renderer(Console(file=StringIO())),
+            input=pipe,
+            output=DummyOutput(),
+        )
+        instance.add("text", "Echo", "Answer stays selectable")
+        task = asyncio.create_task(instance.run())
+        try:
+            await until(lambda: instance.editor.window.render_info is not None)
+            pipe.send_text("draft\nsecond line")
+            await until(lambda: instance.editor.text == "draft\nsecond line")
+            top = instance.editor.window.render_info._y_offset  # one-based border row
+            pipe.send_text(f"\x1b[<0;10;{top}M\x1b[<32;10;{top - 5}M\x1b[<0;10;{top - 5}m")
+            await until(lambda: instance.editor.window.render_info.window_height == 8)
+            assert instance.resize_drag is None
+            assert instance.editor.text == "draft\nsecond line"
+            assert instance.transcript.selected_text() == ""
+            top = instance.editor.window.render_info._y_offset
+            bottom = instance.app.output.get_size().rows
+            pipe.send_text(f"\x1b[<0;10;{top}M\x1b[<32;10;{bottom}M\x1b[<0;10;{bottom}m")
+            await until(lambda: instance.editor.window.render_info.window_height == 1)
+            assert instance.editor.text == "draft\nsecond line"
+        finally:
+            instance.app.exit()
+            await task
+
+
+@pytest.mark.parametrize("width", [40, 80, 120])
+def test_composer_hints_have_clean_separators_and_clickable_clear(chat, width):
+    from prompt_toolkit.data_structures import Size
+
+    chat.app.output.get_size = lambda: Size(rows=30, columns=width)
+    chat.editor.text = "draft"
+    fragments = chat.composer_hint()
+    text = "".join(p[1] for p in fragments)
+    assert " · " in text and "Clear input" in text
+    assert "[" not in text and "]" not in text and "_" not in text
+    assert not any("underline" in p[0] for p in fragments)
+    assert len(text) <= width
+    assert any(len(p) == 3 and "Clear input" in p[1] for p in fragments)

@@ -78,8 +78,3 @@ docker compose up -d --force-recreate
 # delete all sessions
 ~/.local/share/echo-ai/ # ECHO_STATE_DIR
 ```
-
-When another Echo process holds the workspace, an interactive launch asks whether
-to close it and continue here (`y/N`). Echo waits for that process to finish cleanup
-before opening the workspace. Use `echo-ai --resume <ID>` to resume a specific
-session. Processes started before handoff support must be closed manually once.

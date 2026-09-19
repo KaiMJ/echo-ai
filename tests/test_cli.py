@@ -225,3 +225,84 @@ async def test_plain_new_command(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(cli.renderer, "plain", True)
     assert await cli.chat(SimpleNamespace(), tmp_path) is NEW_SESSION
+
+
+async def test_new_sandbox_reuses_empty_session_across_launches_and_new(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from echo_ai.ui.commands import NEW_SESSION
+    from echo_ai.workspace.sandbox import Sandbox
+
+    root, repo, workspace = tmp_path / "state", tmp_path / "repo", tmp_path / "copy/workspace"
+    root.mkdir()
+    repo.mkdir()
+    workspace.mkdir(parents=True)
+    store = Store(root / "sessions.sqlite3")
+    empty = store.create(workspace, asdict(Config(max_steps=3)), repo=repo)
+    updated = store.session(empty)["updated"]
+    store.close()
+    seen = []
+
+    async def close():
+        pass
+
+    def resume(path, config):
+        return SimpleNamespace(workspace=path, mode="sandbox", close=close)
+
+    def create(*args):
+        raise AssertionError("Must reuse the empty workspace")
+
+    async def chat(agent, root):
+        seen.append(agent.session_id)
+        assert agent.model.config.max_steps == 7
+        assert agent.store.messages(agent.session_id) == []
+        assert agent.store.session(agent.session_id)["updated"] == updated
+        return NEW_SESSION if len(seen) == 1 else None
+
+    monkeypatch.setattr(cli, "state_dir", lambda: root)
+    monkeypatch.setattr(Config, "from_env", lambda: Config(max_steps=7))
+    monkeypatch.setattr(Sandbox, "resume", resume)
+    monkeypatch.setattr(Sandbox, "create", create)
+    monkeypatch.setattr(cli, "chat", chat)
+    args = cli.build_parser().parse_args(["chat", "--repo", str(repo), "--sandbox"])
+    assert await cli.execute(args) == 0
+    assert await cli.execute(args) == 0
+    assert seen == [empty, empty, empty]
+
+
+async def test_locked_empty_sandbox_is_not_reused_or_interrupted(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from echo_ai.runtime.store import workspace_lock
+    from echo_ai.workspace.sandbox import Sandbox
+
+    root, repo = tmp_path / "state", tmp_path / "repo"
+    old, new = tmp_path / "old/workspace", tmp_path / "new/workspace"
+    for path in (root, repo, old, new):
+        path.mkdir(parents=True)
+    store = Store(root / "sessions.sqlite3")
+    original = store.create(old, asdict(Config()), repo=repo)
+    store.close()
+
+    async def close():
+        pass
+
+    def resume(path, config):
+        return SimpleNamespace(workspace=path, mode="sandbox", close=close)
+
+    async def inline(function, *args):
+        return function(*args)
+
+    async def chat(agent, root):
+        assert agent.session_id != original and agent.sandbox.workspace == new
+
+    monkeypatch.setattr(cli, "state_dir", lambda: root)
+    monkeypatch.setattr(Config, "from_env", lambda: Config())
+    monkeypatch.setattr(Sandbox, "resume", resume)
+    monkeypatch.setattr(Sandbox, "create", lambda *args: resume(new, Config()))
+    monkeypatch.setattr(cli.asyncio, "to_thread", inline)
+    monkeypatch.setattr(cli, "chat", chat)
+    with workspace_lock(old) as lease:
+        args = cli.build_parser().parse_args(["chat", "--repo", str(repo), "--sandbox"])
+        assert await cli.execute(args) == 0
+        assert not lease.close_requested()

@@ -310,8 +310,31 @@ async def execute(args):
                     continue
             else:
                 backend = Sandbox if use_sandbox else LocalWorkspace
+                reused = False
+                if interactive:
+                    for candidate in store.empty_sessions(repo, backend.mode):
+                        try:
+                            if backend is LocalWorkspace:
+                                sandbox = backend.resume(
+                                    Path(candidate["workspace"]), candidate["state_path"], config
+                                )
+                            else:
+                                sandbox = backend.resume(Path(candidate["workspace"]), config)
+                            # Do not interrupt another process merely to reuse its empty session.
+                            await acquire_session_lock(
+                                locks, sandbox, root, interactive=False, handed_off=handed_off
+                            )
+                            if store.prepare_empty(candidate["id"], asdict(config)):
+                                key, reused = candidate["id"], True
+                                break
+                        except (WorkspaceBusy, ValueError, OSError):
+                            pass
+                        if sandbox is not None:
+                            await sandbox.close()
+                            sandbox = None
+                        locks.close()
                 # Lock the checkout before taking the initial local snapshot.
-                if backend is LocalWorkspace:
+                if not reused and backend is LocalWorkspace:
                     await acquire_session_lock(
                         locks,
                         LocalWorkspace(repo, root, config),
@@ -319,18 +342,20 @@ async def execute(args):
                         interactive=interactive,
                         handed_off=handed_off,
                     )
-                sandbox = await asyncio.to_thread(backend.create, repo, root, config)
-                if backend is Sandbox:
+                if not reused:
+                    sandbox = await asyncio.to_thread(backend.create, repo, root, config)
+                if not reused and backend is Sandbox:
                     await acquire_session_lock(
                         locks, sandbox, root, interactive=interactive, handed_off=handed_off
                     )
-                key = store.create(
-                    sandbox.workspace,
-                    asdict(config),
-                    repo=repo,
-                    mode=sandbox.mode,
-                    state_path=getattr(sandbox, "state_path", None),
-                )
+                if not reused:
+                    key = store.create(
+                        sandbox.workspace,
+                        asdict(config),
+                        repo=repo,
+                        mode=sandbox.mode,
+                        state_path=getattr(sandbox, "state_path", None),
+                    )
                 child = False
             if args.command == "diff":
                 patch = await asyncio.to_thread(sandbox.diff)

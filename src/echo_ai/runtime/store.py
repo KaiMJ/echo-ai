@@ -110,9 +110,11 @@ class Store:
 
     def resolve(self, pointer, repo=None) -> dict:
         if pointer == "latest":
-            matches = self.sessions(repo, include_children=False)
+            matches = [s for s in self.sessions(repo, include_children=False) if s["turns"] > 0]
             if not matches:
-                raise ValueError("No sessions for this repository. Start with echo-ai chat.")
+                raise ValueError(
+                    "No sessions with activity for this repository. Start with echo-ai chat."
+                )
             return matches[0]
         matches = [s for s in self.sessions() if s["id"].startswith(pointer)]
         if not matches:
@@ -120,6 +122,31 @@ class Store:
         if len(matches) != 1:
             raise ValueError(f"Ambiguous session: {pointer}; use a longer ID")
         return matches[0]
+
+    def empty_sessions(self, repo, mode):
+        return [
+            dict(row)
+            for row in self.db.execute(
+                "SELECT * FROM sessions WHERE repo=? AND mode=? AND parent_id IS NULL "
+                "AND NOT EXISTS (SELECT 1 FROM messages WHERE session_id=sessions.id) "
+                "AND NOT EXISTS (SELECT 1 FROM runs WHERE session_id=sessions.id) "
+                "AND NOT EXISTS (SELECT 1 FROM sessions child WHERE child.parent_id=sessions.id) "
+                "ORDER BY updated DESC, rowid DESC",
+                (str(Path(repo).resolve()), mode),
+            )
+        ]
+
+    def prepare_empty(self, key, config):
+        """Refresh new-session defaults under the workspace lock, without bumping activity."""
+        with self.db:
+            result = self.db.execute(
+                "UPDATE sessions SET config=? WHERE id=? AND parent_id IS NULL "
+                "AND NOT EXISTS (SELECT 1 FROM messages WHERE session_id=sessions.id) "
+                "AND NOT EXISTS (SELECT 1 FROM runs WHERE session_id=sessions.id) "
+                "AND NOT EXISTS (SELECT 1 FROM sessions child WHERE child.parent_id=sessions.id)",
+                (json.dumps(config), key),
+            )
+        return result.rowcount == 1
 
     def add(self, key: str, message: dict):
         with self.db:
