@@ -2,6 +2,8 @@
 
 A small local coding agent for Linux. Qwen or Gemma runs on vLLM, with the LiteLLM SDK inside Echo; coding tools edit your checkout directly by default. Use `--sandbox` to work in a disposable Docker copy instead.
 
+![Echo](docs/echo-ai.png)
+
 ## Features
 
 - **Interactive Chat**: Streamed terminal chat with terminal control.
