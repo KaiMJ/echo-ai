@@ -473,7 +473,8 @@ class TerminalChat:
                 text = self.editor.text.strip()
                 if text:
                     self.editor.buffer.append_to_history()
-                    self.editor.text = ""
+                    self.editor.buffer.reset()
+                    self.editor.buffer.load_history_if_not_yet_loaded()
                     self.task = self.app.create_background_task(self.submit(text))
 
         @keys.add("c-j")

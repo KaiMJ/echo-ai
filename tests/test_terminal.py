@@ -711,6 +711,48 @@ async def test_shift_ctrl_u_clears_draft_but_ctrl_u_keeps_line_editing(tmp_path,
             await task
 
 
+async def test_up_recalls_latest_submitted_input(tmp_path):
+    import asyncio
+
+    from prompt_toolkit.input import create_pipe_input
+
+    submitted = []
+
+    async def run(prompt):
+        submitted.append(prompt)
+        return {"status": "completed"}
+
+    async def until(predicate):
+        async with asyncio.timeout(3):
+            while not predicate():
+                await asyncio.sleep(0.01)
+
+    with create_pipe_input() as pipe:
+        instance = TerminalChat(
+            SimpleNamespace(session_id="test", run=run),
+            tmp_path,
+            Renderer(Console(file=StringIO())),
+            input=pipe,
+            output=DummyOutput(),
+        )
+        task = asyncio.create_task(instance.run())
+        try:
+            await until(lambda: instance.app.is_running)
+            pipe.send_text("first\r")
+            await until(lambda: submitted == ["first"] and not instance.busy)
+            pipe.send_text("second\r")
+            await until(lambda: submitted == ["first", "second"] and not instance.busy)
+            pipe.send_text("\x1b[A")
+            await until(lambda: instance.editor.text == "second")
+            pipe.send_text("\x1b[A")
+            await until(lambda: instance.editor.text == "first")
+            pipe.send_text("\x1b[B")
+            await until(lambda: instance.editor.text == "second")
+        finally:
+            instance.app.exit()
+            await task
+
+
 def test_help_uses_actions_without_terminal_protocol_jargon(chat):
     text = chat.help_entry().text
     assert all(f"**{action}:**" in text for action in ("Select", "Copy", "Paste", "Clear input"))
