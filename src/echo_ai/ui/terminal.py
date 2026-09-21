@@ -12,6 +12,7 @@ from pathlib import PurePath
 
 import httpx
 from prompt_toolkit import Application
+from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import ANSI, to_formatted_text
 from prompt_toolkit.formatted_text.utils import split_lines
@@ -49,12 +50,12 @@ from echo_ai.ui.commands import (
     NEW_SESSION,
     CommandCompleter,
     help_text,
-    session_rows_panel,
     status_panel,
     status_text,
 )
 from echo_ai.ui.model_settings import ModelSettings
 from echo_ai.ui.renderer import safe_text
+from echo_ai.ui.sessions import SessionPicker
 
 # prompt_toolkit has no Ctrl+Shift+letter key token. Reserve F24 internally for
 # the CSI-u / modifyOtherKeys sequences terminals can forward for Ctrl+Shift+C.
@@ -309,10 +310,14 @@ class TranscriptControl(UIControl):
             entries = [self.chat.copy_selected] if self.popup else self.chat.copy_entries
         else:
             entries = [self.chat.selected] if self.popup else self.chat.entries
+        waiting = self.chat.waiting_for_model and not self.popup and not self.chat.copy_mode
         key = (
             width,
+            waiting,
             int((self.chat.copy_time if self.chat.copy_mode else time.monotonic()) * 8)
-            if any(entry is not None and entry.expandable and not entry.done for entry in entries)
+            if waiting or any(
+                entry is not None and entry.expandable and not entry.done for entry in entries
+            )
             else None,
             tuple(
                 (
@@ -424,6 +429,11 @@ class TranscriptControl(UIControl):
                             entry,
                         ),
                     )
+        if waiting:
+            rows.append(([
+                ("class:spinner", fit_text(self.chat.spinner() + " ", width)),
+                ("class:muted", fit_text("Processing…", max(0, width - 2))),
+            ], None))
         self.row_cache_key = key
         self.row_cache = rows
         return self.show_rows(rows, height)
@@ -524,10 +534,12 @@ class TerminalChat:
         self.drafts = {}
         self.selected = None
         self.task = None
+        self.waiting_for_model = False
         self.approval = None
         self.approval_correction = False
         self.pending_session = None
         self.model_settings = None
+        self.session_picker = None
         if not hasattr(agent, "permissions"):
             agent.permissions = Permissions()
         agent.permissions.ask = self.ask_permission
@@ -547,10 +559,15 @@ class TerminalChat:
             height=self.input_height,
             history=DeferredFileHistory(str(root / "input-history")),
             completer=CommandCompleter(),
+            complete_while_typing=False,
             read_only=Condition(lambda: self.copy_mode),
             focus_on_click=True,
             style="class:composer",
         )
+        # The default async completer discards a sole exact match. Commands
+        # should keep their menu and description until submitted or dismissed.
+        self.editor.buffer.on_text_changed += self.update_command_completions
+        self.editor.buffer.on_cursor_position_changed += self.update_command_completions
         self.permission_input = TextArea(
             prompt="tell Echo › ",
             multiline=True,
@@ -780,12 +797,18 @@ class TerminalChat:
                     filter=Condition(lambda: self.model_settings is not None),
                 ), left=2, right=2),
                 Float(xcursor=True, ycursor=True, content=CompletionsMenu(max_height=10)),
+                Float(content=ConditionalContainer(
+                    DynamicContainer(lambda: self.session_picker or Window()),
+                    filter=Condition(lambda: self.session_picker is not None),
+                ), left=2, right=2, top=2),
             ],
         )
         self.app = Application(
             layout=Layout(layout, focused_element=self.editor),
             key_bindings=ConditionalKeyBindings(
-                keys, filter=Condition(lambda: self.model_settings is None),
+                keys, filter=Condition(
+                    lambda: self.model_settings is None and self.session_picker is None
+                ),
             ),
             full_screen=True,
             mouse_support=Condition(lambda: not self.copy_mode),
@@ -1057,6 +1080,11 @@ class TerminalChat:
             )
         return fragments
 
+    def update_command_completions(self, buffer):
+        completions = list(buffer.completer.get_completions(buffer.document, CompleteEvent()))
+        if completions:
+            buffer._set_completions(completions)
+
     def clear_input(self, event=None):
         if event is None or (
             event.event_type == MouseEventType.MOUSE_UP and event.button == MouseButton.LEFT
@@ -1117,6 +1145,12 @@ class TerminalChat:
     def on_event(self, kind, value):
         actor = "Review" if kind.startswith("child_") else "Echo"
         kind = kind.removeprefix("child_")
+        if actor == "Echo":
+            if kind == "model_start":
+                self.waiting_for_model = True
+            elif kind in {"reasoning", "text", "tool_call_delta", "tool_start",
+                          "model_end", "run_end", "input_rejected"}:
+                self.waiting_for_model = False
         if kind in {"reasoning", "text"}:
             if kind == "text":
                 thought = self.current.get((actor, "reasoning"))
@@ -1200,6 +1234,15 @@ class TerminalChat:
         elif kind == "task":  # child_task after removing the prefix
             self.add("notice", "Read-only subagent", value)
         self.app.invalidate()
+
+    def close_session_picker(self):
+        self.session_picker = None
+        self.app.layout.focus(self.editor)
+        self.app.invalidate()
+
+    def choose_session(self, target):
+        self.close_session_picker()
+        self.confirm_session(target)
 
     def confirm_session(self, target):
         if self.pending_session is not None or self.approval is not None:
@@ -1307,16 +1350,15 @@ class TerminalChat:
                 session = self.agent.store.session(self.agent.session_id)
                 if text == "/sessions":
                     rows = self.agent.store.sessions(session["repo"], include_children=False)
-                    for row in reversed(rows):
-                        self.add(
-                            "notice", "Sessions", f"{row['title'] or 'New session'}\n{row['id']}",
-                            session_target=row,
-                            renderable=session_rows_panel(
-                                [row], current=self.agent.session_id, theme=self.theme,
-                                clickable=True,
-                            ),
+                    if rows:
+                        self.session_picker = SessionPicker(
+                            rows, self.agent.session_id, self.choose_session,
+                            self.close_session_picker, fit_text, self.app.output.get_size,
                         )
-                    if not rows:
+                        self.app.layout.update_parents_relations()
+                        self.app.layout.focus(self.session_picker.control)
+                        self.app.invalidate()
+                    else:
                         self.add("notice", "Sessions", "No sessions found.")
                 else:
                     target = self.agent.store.resolve(text.split(maxsplit=1)[1], session["repo"])
@@ -1370,10 +1412,12 @@ class TerminalChat:
             self.add("notice", "Unknown command", "Use /help.")
             return
         self.add("user", "You", text)
+        self.waiting_for_model = True
         self.renderer.start()
         refresh = asyncio.create_task(self.refresh_activity())
         status = "failed"
         try:
+            await self.render_submission()
             result = await self.agent.run(text)
             status = result.get("status", "completed")
         except asyncio.CancelledError:
@@ -1391,6 +1435,23 @@ class TerminalChat:
                     "child_run_end" if actor == "Review" else "run_end", {"status": status}
                 )
             self.app.invalidate()
+
+    async def render_submission(self):
+        """Paint the submitted prompt before synchronous model startup work."""
+        if not self.app.is_running:
+            return
+        rendered = asyncio.get_running_loop().create_future()
+
+        def after_render(app):
+            if not rendered.done():
+                rendered.set_result(None)
+
+        self.app.after_render += after_render
+        try:
+            self.app.invalidate()
+            await rendered
+        finally:
+            self.app.after_render -= after_render
 
     async def refresh_activity(self):
         while True:

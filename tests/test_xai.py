@@ -94,3 +94,33 @@ async def test_xai_http_auth_failure_is_not_unknown_cost(monkeypatch):
         await model.complete([], [], lambda kind, value: events.append((kind, value)))
     usage = next(value for kind, value in events if kind == "model_cost")
     assert usage["cost_usd"] == 0 and usage["cost_source"] == "rejected"
+
+
+async def test_unavailable_model_is_quiet_and_can_be_changed(monkeypatch, capsys):
+    from dataclasses import replace
+
+    from echo_ai.runtime.errors import RequestRejected
+
+    monkeypatch.setenv("XAI_API_KEY", "synthetic-key")
+
+    def respond(request):
+        if json.loads(request.content)["model"] == "unavailable-model":
+            return httpx.Response(404, json={"error": {
+                "message": "Model unavailable-model not found", "type": "not_found_error",
+            }})
+        chunk = {"id": "response-1", "object": "chat.completion.chunk", "created": 1,
+                 "model": "grok-4.3", "choices": [{"index": 0,
+                 "delta": {"content": "Recovered."}, "finish_reason": "stop"}]}
+        return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                              text="data: " + json.dumps(chunk) + "\n\ndata: [DONE]\n\n")
+
+    config = xai_config()
+    model = Model(replace(config, model="unavailable-model"), httpx.MockTransport(respond))
+    with pytest.raises(RequestRejected, match="unavailable-model"):
+        await model.complete([], [], lambda *_: None)
+    model.config = config
+    response, _ = await model.complete([], [], lambda *_: None)
+    assert response["content"] == "Recovered."
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""

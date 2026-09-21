@@ -131,6 +131,10 @@ async def completion_chunks(params, transport=None):
     from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
     from openai import APIError
 
+    # Echo renders request failures itself. SDK banners write directly to stdout
+    # and corrupt prompt_toolkit's persistent screen, even after model changes.
+    litellm.suppress_debug_info = True
+
     client = None
     stream = None
     try:

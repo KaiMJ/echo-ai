@@ -230,6 +230,29 @@ def test_spinner_animates_and_stops_on_completion(chat, monkeypatch):
     assert any(style == "class:key" and text == "Ctrl+J" for style, text in chat.composer_hint())
 
 
+@pytest.mark.parametrize("event,value", [
+    ("text", "Hello"),
+    ("reasoning", "Thinking"),
+    ("tool_call_delta", {"index": 0, "name": "list", "arguments": "{}"}),
+    ("run_end", {"status": "failed"}),
+    ("run_end", {"status": "cancelled"}),
+    ("run_end", {"status": "completed"}),
+])
+def test_processing_animation_lifecycle(chat, monkeypatch, event, value):
+    chat.add("user", "You", "Hello")
+    monkeypatch.setattr("echo_ai.ui.terminal.time.monotonic", lambda: 1.0)
+    chat.on_event("model_start", {})
+    before = lines(chat.transcript)
+    assert "Processing…" in before[-1]
+    monkeypatch.setattr("echo_ai.ui.terminal.time.monotonic", lambda: 1.2)
+    assert lines(chat.transcript)[-1] != before[-1]
+    assert len(chat.entries) == 1  # Transient activity isn't conversation content.
+    chat.on_event(event, value)
+    assert "Processing…" not in "\n".join(lines(chat.transcript))
+    chat.on_event("model_start", {})
+    assert "Processing…" in lines(chat.transcript)[-1]
+
+
 def test_drag_highlights_and_copies_without_opening_details(chat):
     import base64
 
@@ -424,7 +447,8 @@ async def test_session_list_switch_and_restored_conversation(chat, tmp_path, mon
     chat.agent.store = store
     chat.agent.session_id = current
     await chat.submit("/sessions")
-    assert "Other task" in chat.entries[-1].text
+    assert any(row["title"] == "Other task" for row in chat.session_picker.rows)
+    chat.close_session_picker()
     await chat.submit("/sessions missing")
     assert chat.entries[-1].title == "Error"
     results = []
@@ -544,6 +568,43 @@ def test_drag_starting_on_empty_row(chat):
     assert chat.transcript.selected_text() == "\nBeta"
 
 
+async def test_submission_is_painted_before_model_startup(tmp_path):
+    import asyncio
+
+    from prompt_toolkit.input import create_pipe_input
+
+    painted = []
+    started = asyncio.Event()
+
+    async def run(prompt):
+        # Anything before the first await in the real agent can block rendering.
+        painted.append((instance.editor.text, "\n".join(
+            "".join(fragment[1] for fragment in row)
+            for row, _ in instance.transcript.visible
+        )))
+        started.set()
+        return {"status": "completed"}
+
+    with create_pipe_input() as pipe:
+        instance = TerminalChat(
+            SimpleNamespace(session_id="test", run=run), tmp_path,
+            Renderer(Console(file=StringIO())), input=pipe, output=DummyOutput(),
+        )
+        task = asyncio.create_task(instance.run())
+        try:
+            async with asyncio.timeout(3):
+                while not instance.app.is_running:
+                    await asyncio.sleep(0.01)
+                pipe.send_text("Show this prompt immediately\r")
+                await started.wait()
+            assert painted[0][0] == ""
+            assert "Show this prompt immediately" in painted[0][1]
+            assert "Processing…" in painted[0][1]
+        finally:
+            instance.app.exit()
+            await task
+
+
 async def test_typing_and_newline_while_streaming_and_slash_menu(tmp_path):
     import asyncio
 
@@ -598,6 +659,25 @@ async def test_typing_and_newline_while_streaming_and_slash_menu(tmp_path):
             pipe.send_text("/")
             await until(lambda: instance.editor.buffer.complete_state is not None)
             assert "/help" in [c.text for c in instance.editor.buffer.complete_state.completions]
+            pipe.send_text("mode")
+            await until(lambda: instance.editor.text == "/mode")
+            assert [c.text for c in instance.editor.buffer.complete_state.completions] == ["/model"]
+            pipe.send_text("l")
+            await until(lambda: instance.editor.text == "/model")
+            await asyncio.sleep(0.05)
+            assert [c.text for c in instance.editor.buffer.complete_state.completions] == ["/model"]
+            opened = []
+            instance.open_model_settings = lambda: opened.append(True)
+            pipe.send_text("\r")
+            await until(lambda: opened == [True])
+            assert instance.editor.text == ""
+            pipe.send_text("/mode\r")
+            await until(lambda: instance.editor.text == "/model")
+            assert instance.editor.buffer.complete_state is not None
+            assert opened == [True]
+            pipe.send_text("\x1b")
+            await until(lambda: instance.editor.buffer.complete_state is None)
+            assert instance.editor.text == "/model"
             instance.editor.text = ""
             pipe.send_text("hello /")
             await until(lambda: instance.editor.text == "hello /")
@@ -686,17 +766,63 @@ async def test_sessions_are_formatted_with_current_marker(chat, tmp_path):
         store.add(other, {"role": "user", "content": "[red]literal title[/red]"})
         chat.agent.store, chat.agent.session_id = store, current
         await chat.submit("/sessions")
-        assert all(entry.renderable is not None for entry in chat.entries)
-        rendered = "\n".join(
-            "".join(p[1] for p in line)
-            for entry in chat.entries for line in entry.markdown_lines(80)
-        )
-        assert "current" in rendered and current in rendered and other in rendered
+        rendered = "".join(p[1] for p in chat.session_picker.text())
+        assert "current" in rendered and current[:8] in rendered and other[:8] in rendered
         assert "[red]literal title[/red]" in rendered
-        assert "/sessions ID to switch" in rendered
-        assert [entry.session_target["id"] for entry in chat.entries] == [current, other]
+        assert len(rendered.splitlines()) == 2
+        assert chat.entries == []
+        assert chat.app.layout.has_focus(chat.session_picker.control)
     finally:
         store.close()
+
+
+async def test_session_picker_keyboard_scroll_cancel_and_resume(tmp_path):
+    import asyncio
+
+    from prompt_toolkit.input import create_pipe_input
+
+    rows = [{"id": f"session-{i:02}", "title": f"Task {i}"} for i in range(20)]
+    store = SimpleNamespace(session=lambda _: {"repo": str(tmp_path)},
+                            sessions=lambda *args, **kwargs: rows)
+
+    async def until(predicate):
+        async with asyncio.timeout(3):
+            while not predicate():
+                await asyncio.sleep(0.01)
+
+    with create_pipe_input() as pipe:
+        instance = TerminalChat(
+            SimpleNamespace(session_id=rows[0]["id"], store=store), tmp_path,
+            Renderer(Console(file=StringIO())), input=pipe, output=DummyOutput(),
+        )
+        instance.editor.text = "draft to keep"
+        task = asyncio.create_task(instance.app.run_async())
+        try:
+            await until(lambda: instance.app.is_running)
+            await instance.submit("/sessions")
+            picker = instance.session_picker
+            pipe.send_text("\x1b[B")
+            await until(lambda: picker.index == 1)
+            pipe.send_text("\x1b[A")
+            await until(lambda: picker.index == 0)
+            pipe.send_text("\x1b[F")
+            await until(lambda: picker.index == 19)
+            await until(lambda: picker.window.vertical_scroll > 0)
+            pipe.send_text("\x1b")
+            await until(lambda: instance.session_picker is None)
+            assert instance.editor.text == "draft to keep"
+            assert instance.app.layout.has_focus(instance.editor)
+            await instance.submit("/sessions")
+            pipe.send_text("\x1b[B\r")
+            await until(lambda: instance.pending_session is not None)
+            assert instance.pending_session == rows[1]
+            assert instance.session_picker is None
+            pipe.send_text("y")
+            assert await asyncio.wait_for(task, 3) == rows[1]["id"]
+        finally:
+            if not task.done():
+                instance.app.exit()
+                await task
 
 
 async def test_new_command_exits_to_fresh_session(chat, monkeypatch):

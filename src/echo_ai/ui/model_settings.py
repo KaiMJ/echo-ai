@@ -5,6 +5,7 @@ from dataclasses import replace
 
 from prompt_toolkit.application.current import get_app
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.key_binding.bindings.focus import focus_next, focus_previous
 from prompt_toolkit.layout import HSplit, ScrollablePane, VSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
@@ -98,8 +99,14 @@ class ModelSettings:
         def apply(event):
             self.save()
 
+        # Single-line text fields normally consume vertical arrows for history.
+        # In this form they navigate settings, including the action buttons.
+        keys.add("down", eager=True)(focus_next)
+        keys.add("up", eager=True)(focus_previous)
+
         rows = [Label("Choose a model. Save applies to your next turn."),
-                Label("←/→ choose · Tab next · Ctrl+S save · Esc cancel"),
+                Label("↑/↓ move · ←/→ choose · Type to edit"),
+                Label("Tab next · Ctrl+S save · Esc cancel"),
                 Window(height=1)]
         for label, widget in (
             ("Preset", self.profile), ("Model ID", self.fields["model"]),

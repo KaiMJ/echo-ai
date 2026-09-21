@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from prompt_toolkit.data_structures import Size
+from prompt_toolkit.formatted_text import to_formatted_text
 from prompt_toolkit.input import DummyInput, create_pipe_input
 from prompt_toolkit.output import DummyOutput
 from rich.console import Console
@@ -161,7 +162,17 @@ async def test_settings_keyboard_navigation_save_cancel_and_modal_isolation(agen
             await wait_for(lambda: chat.model_settings is not None)
             pipe.send_text("\x1b[C")  # Current session -> xAI
             await wait_for(lambda: chat.model_settings.profile.value == "xai")
-            pipe.send_text("\t\t\x1b[C")  # Model -> reasoning -> medium
+            pipe.send_text("\x1b[B")  # Down: preset -> model ID.
+            await wait_for(lambda: chat.app.layout.has_focus(chat.model_settings.fields["model"]))
+            model_text = chat.model_settings.fields["model"].text
+            pipe.send_text("\x1b[A")  # Up works from a text field too.
+            await wait_for(lambda: chat.app.layout.has_focus(chat.model_settings.profile.control))
+            assert chat.model_settings.fields["model"].text == model_text
+            pipe.send_text("\x1b[B\x1b[B\x1b[C")  # Model -> reasoning -> medium.
+            await wait_for(lambda: chat.model_settings.reasoning.value == "medium")
+            pipe.send_text("\x1b[D")
+            await wait_for(lambda: chat.model_settings.reasoning.value == "low")
+            pipe.send_text("\x1b[C")
             await wait_for(lambda: chat.model_settings.reasoning.value == "medium")
             await asyncio.sleep(0.05)
             screen = chat.app.renderer.last_rendered_screen
@@ -171,7 +182,13 @@ async def test_settings_keyboard_navigation_save_cancel_and_modal_isolation(agen
             )
             assert "Model settings" in visible and "Save" in visible
             assert "Window too small" not in visible
-            pipe.send_text("\x13")  # Ctrl+S
+            pipe.send_text("\x1b[B" * 8)  # Remaining fields -> Save button.
+            await wait_for(lambda: "Save" in "".join(
+                part[1] for part in to_formatted_text(
+                    getattr(chat.app.layout.current_control, "text", "")
+                )
+            ))
+            pipe.send_text("\r")
             await wait_for(lambda: chat.model_settings is None)
             assert agent.model.config.reasoning_effort == "medium"
             assert chat.editor.text == "keep draft"
