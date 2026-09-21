@@ -4,6 +4,10 @@ Start with the [current architecture](architecture.md) for Echo's existing runti
 
 For the website, see [Landing-page development](landing-page.md), including local checks, terminal captures, and deployment.
 
+For local inference checks and reasoning settings, see [Model verification](model-verification.md).
+
+See the [public security and usability review](public-readiness-review.md) for findings, validation, and remaining release checks.
+
 ## Integration plans
 
 These documents describe proposed implementation work. They do not imply that the described commands or tools are available.

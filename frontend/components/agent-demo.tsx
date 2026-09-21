@@ -44,6 +44,7 @@ const scenes = [
 
 export function AgentDemo() {
   const [active, setActive] = useState(0);
+  const [paused, setPaused] = useState(false);
   const scene = scenes[active];
   return (
     <div className="demo-shell">
@@ -64,7 +65,7 @@ export function AgentDemo() {
         </div>
         <div className="demo-prompt">{scene.prompt}</div>
         <div className="flex items-center gap-4 my-7">
-          <ThinkingOrb state={scene.state} size={64} theme="dark" />
+          <ThinkingOrb state={scene.state} size={64} theme="dark" paused={paused} />
           <div>
             <span className="block text-white font-semibold">Echo</span>
             <span className="text-sm text-neutral-400">{scene.action}</span>
@@ -82,6 +83,14 @@ export function AgentDemo() {
           {scene.result}
           <span className="cursor" aria-hidden="true" />
         </p>
+        <button
+          type="button"
+          className="text-sm text-neutral-300 underline underline-offset-4"
+          aria-pressed={paused}
+          onClick={() => setPaused(!paused)}
+        >
+          {paused ? "Resume demo animation" : "Pause demo animation"}
+        </button>
       </div>
       <div className="demo-tabs" role="tablist" aria-label="Example workflows">
         {scenes.map((item, index) => (
@@ -122,7 +131,7 @@ export function AgentDemo() {
 export function OrbSignature() {
   return (
     <div className="orb-signature" aria-hidden="true">
-      <ThinkingOrb state="breathing" size={64} theme="light" />
+      <ThinkingOrb state="breathing" size={64} theme="light" paused />
     </div>
   );
 }

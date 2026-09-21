@@ -14,6 +14,7 @@ def clean_config(tmp_path, monkeypatch):
         if name.startswith("ECHO_"):
             monkeypatch.delenv(name)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "user-config"))
     return tmp_path
 
 
@@ -26,6 +27,7 @@ def test_yaml_and_environment_precedence(clean_config, monkeypatch):
         "tools:\n  read:\n    max_lines: 300\n  edit:\n    max_bytes: 2048\n"
     )
     (clean_config / ".env").write_text("ECHO_TEMPERATURE=0.5\n")
+    monkeypatch.setenv("ECHO_ENV_FILE", str(clean_config / ".env"))
     monkeypatch.setenv("ECHO_MAX_TOKENS", "5000")
     config = Config.from_env()
     assert not config.reasoning_enabled

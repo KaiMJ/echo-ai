@@ -1,5 +1,5 @@
 # Shared settings. ECHO_* environment variables override YAML.
-model-profile: models/qwen.yaml
+model-profile: builtin:qwen
 
 agent:
   max_steps: 64

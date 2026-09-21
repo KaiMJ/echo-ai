@@ -1,5 +1,5 @@
-# Use: uv run python models/manage.py qwen up
-# Model command and cache mount are supplied from models/<name>.yaml.
+# Use: uv run python scripts/deploy_local_model.py qwen up
+# Model command and cache mount are supplied from packaged model templates.
 name: echo
 services:
   inference:

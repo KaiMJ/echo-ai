@@ -2,10 +2,12 @@
 
 These guides cover workflows available in the repository today.
 
-- [Getting started](getting-started.md): install, configure, and run Echo; manage sessions and use the sandbox.
-- [Google tools setup](google-tools.md): connect your account and verify Drive and Sheets access with the standalone example.
+- [Getting started](getting-started.md): install, configure, and run Echo.
+- [Configuration](configuration.md): credentials, repairs, and separate development settings.
+- [Sessions](sessions.md): resume conversations and inspect changes.
+- [Google tools setup](google-tools.md): notes for the private development example; not included in fresh clones.
 - [Workspaces and file changes](workspaces-and-changes.md): local and sandbox behavior, checkpoints, and undo/apply.
 - [Execution modes and security](security.md): permissions, isolation boundaries, and limits.
 
-For model deployment, see the [model profiles guide](../../models/README.md).
+For model deployment, see the [local model guide](local-models.md).
 For architecture and planned features, see [Development documentation](../development/README.md).

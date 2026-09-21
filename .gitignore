@@ -1,4 +1,3 @@
-/scripts/
 __pycache__/
 .venv/
 .pytest_cache/
@@ -11,8 +10,5 @@ dist/
 .env.*
 !.env.example
 
-# Local Google client configuration and generated authorization
-google_credentials.json
-google_token.json
-credentials.json
-token.json
+# Personal utilities, experiments, notes, and credentials
+/local-dev/

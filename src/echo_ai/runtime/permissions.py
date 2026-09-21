@@ -1,6 +1,7 @@
 """Process-local tool approvals. Nothing here is stored with a session."""
 
 import shlex
+from pathlib import PurePath
 
 
 def rule_for(name, args):
@@ -20,7 +21,19 @@ def rule_for(name, args):
         return None, ""
     if not words:
         return None, ""
-    prefix = tuple(words[:2] if words[0] in {"python", "python3"} and len(words) > 1 else words[:1])
+    executable = PurePath(words[0]).name
+    # An interpreter prefix can authorize different code on every invocation.
+    # Keep these calls eligible for one-time approval, never a reusable rule.
+    if executable in {"bash", "sh", "dash", "zsh", "fish", "env", "sudo", "xargs"}:
+        return None, ""
+    python = executable.startswith(("python", "pypy"))
+    if python and (
+        len(words) < 2 or words[1].startswith("-")
+    ):
+        return None, ""
+    if executable in {"node", "nodejs", "ruby", "perl", "php"}:
+        return None, ""
+    prefix = tuple(words[:2] if python else words[:1])
     return (name, prefix), " ".join(prefix) + " *"
 
 

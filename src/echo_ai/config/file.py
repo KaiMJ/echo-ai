@@ -1,6 +1,7 @@
 """Configuration file structure and explicit environment loading."""
 
 import os
+from importlib.resources import files
 from pathlib import Path
 
 import yaml
@@ -65,18 +66,52 @@ def yaml_values(document, schema=YAML_SECTIONS, path="configuration"):
     return values
 
 
+def config_dir():
+    root = Path(os.getenv("XDG_CONFIG_HOME") or "~/.config").expanduser()
+    if not root.is_absolute():
+        root = Path("~/.config").expanduser()
+    return root / "echo-ai"
+
+
+def config_path():
+    if "ECHO_CONFIG_FILE" in os.environ:
+        return Path(os.environ["ECHO_CONFIG_FILE"]).expanduser()
+    local = Path("echo.yaml")
+    return local if local.exists() else config_dir() / "echo.yaml"
+
+
+def environment_path():
+    return Path(os.getenv("ECHO_ENV_FILE", str(config_dir() / ".env"))).expanduser()
+
+
 def load_environment():
-    """Load only the explicitly selected file or the current directory's .env."""
-    path = Path(os.getenv("ECHO_ENV_FILE", ".env")).expanduser()
+    """Load global credentials or an explicit file, never an incidental project .env."""
+    path = environment_path()
     if "ECHO_ENV_FILE" in os.environ and not path.is_file():
         raise ValueError(f"Configuration file does not exist: {path}")
     load_dotenv(path, override=False)
 
 
+def builtin_profiles():
+    return files("echo_ai.config") / "templates" / "models"
+
+
+def builtin_profile_names():
+    return sorted(p.name.removesuffix(".yaml") for p in builtin_profiles().iterdir()
+                  if p.name.endswith(".yaml") and p.is_file())
+
+
 def read_model_profile(path):
     """Read one model's request settings and optional local deployment settings."""
+    if str(path).startswith("builtin:"):
+        name = str(path).removeprefix("builtin:")
+        if name not in builtin_profile_names():
+            raise ValueError(f"Unknown built-in model profile: {name}")
+        source = builtin_profiles() / f"{name}.yaml"
+    else:
+        source = Path(path)
     try:
-        model = yaml.safe_load(Path(path).read_text())
+        model = yaml.safe_load(source.read_text())
     except (OSError, yaml.YAMLError) as error:
         raise ValueError(f"Cannot load model profile {path}: {error}") from error
     if not isinstance(model, dict):
@@ -88,9 +123,10 @@ def read_model_profile(path):
     return model, deployment
 
 
-def read_document():
-    path = Path(os.getenv("ECHO_CONFIG_FILE", "echo.yaml")).expanduser()
-    if "ECHO_CONFIG_FILE" not in os.environ and not path.exists():
+def read_document(path=None, *, use_environment=True):
+    explicit = path is not None or "ECHO_CONFIG_FILE" in os.environ
+    path = Path(path) if path is not None else config_path()
+    if not explicit and not path.exists():
         document = {}
     else:
         try:
@@ -101,13 +137,17 @@ def read_document():
         document = {}
     if not isinstance(document, dict):
         raise ValueError("configuration must be a YAML mapping")  # noqa: TRY004
-    profile = os.getenv("ECHO_MODEL_PROFILE", document.pop("model-profile", ""))
+    profile = document.pop("model-profile", "")
+    if use_environment:
+        profile = os.getenv("ECHO_MODEL_PROFILE", profile)
     if profile:
         if not isinstance(profile, str):
             raise ValueError("model-profile must be a path string")
-        profile_path = Path(profile).expanduser()
-        if not profile_path.is_absolute():
-            profile_path = path.parent / profile_path
+        profile_path = profile
+        if not profile.startswith("builtin:"):
+            profile_path = Path(profile).expanduser()
+            if not profile_path.is_absolute():
+                profile_path = path.parent / profile_path
         model, _ = read_model_profile(profile_path)
         overrides = document.get("local-model", {})
         if not isinstance(overrides, dict):

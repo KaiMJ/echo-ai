@@ -8,6 +8,36 @@ changes. The project can be a Git repository or an ordinary directory.
 | Local (default) | On the host | In the original checkout or directory |
 | Sandbox (`--sandbox`) | In a fresh Docker container for each tool call | In a session copy mounted at `/workspace` |
 
+## Start in a sandbox
+
+Build the image from the Echo checkout:
+
+```bash
+docker build -t echo-ai-sandbox:local .
+```
+
+Then open your project and run `echo-ai --sandbox`. Docker must be running.
+The image includes Python, Bash, Git, ripgrep, and Echo's locked runtime and test
+dependencies. `/workspace/src` is on Python's import path.
+
+For other project dependencies, create `Dockerfile.echo`:
+
+```dockerfile
+FROM echo-ai-sandbox:local
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+```
+
+Build and select it:
+
+```bash
+docker build -f Dockerfile.echo -t my-project-sandbox:local .
+echo-ai --sandbox --sandbox-image my-project-sandbox:local
+```
+
+You can also select the image with `sandbox.sandbox_image` in your configuration
+or `ECHO_SANDBOX_IMAGE`. The image must retain `/opt/echo_sandbox.py`.
+
 ## Sandbox copy and image
 
 The sandbox copy lives in Echo's session state directory on the host. It stays

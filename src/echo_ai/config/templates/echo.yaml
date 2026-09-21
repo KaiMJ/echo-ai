@@ -1,0 +1,11 @@
+# Echo user configuration. Environment variables override these settings.
+# Built-in profiles are read from the installed package.
+model-profile: builtin:qwen
+
+local-model:
+  base_url: http://127.0.0.1:8001/v1
+  # Credentials are read from this variable, never stored in session settings.
+  api_key_env: ECHO_API_KEY
+
+agent:
+  max_steps: 20

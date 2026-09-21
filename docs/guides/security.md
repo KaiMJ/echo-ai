@@ -1,54 +1,11 @@
-# Execution modes
+# Security essentials
 
-Echo edits the checkout directly by default. Local shell commands run with the
-host user's permissions and network access; local mode provides no OS isolation.
-File tools constrain resolved paths to the checkout. Local tools retain timeouts
-and output caps; cancellation kills the tool's process group, including ordinary
-background children. Processes that deliberately detach into another session are
-outside that cleanup guarantee. Docker CPU/memory/process limits do not apply.
-Local file checkpoints cover agent edit and write calls on eligible paths. They
-are not complete backups. `/undo` can restore those recorded changes.
+Echo is designed for trusted, single-user development. Review commands and changes before approving them.
 
-## Optional sandbox boundaries
+- **Local mode runs on your machine.** Shell commands have your account's permissions, network access, and environment variables, including API keys. There is no OS isolation.
+- **Sandbox mode works on a copy.** Use `--sandbox` to run tools in Docker without network access. It reduces accidental damage, but is not a guarantee against malicious code or container escapes. Disk usage is not strictly capped.
+- **Approvals matter.** A reusable approval permits later matching commands; it does not make them safe. Prefer one-time approval when unsure. `--yolo` bypasses approval checks.
+- **Protect your data.** Repository text and tool output can be saved in transcripts and sent to your configured model provider, even in sandbox mode. Git ignore rules do not catch every secret.
+- **Review changes and keep backups.** Use `/diff` before `/apply`. `/undo`, `/diff`, and `/apply` cover recorded agent edits and writes, not changes made through shell commands.
 
-The following applies when starting a session with `--sandbox`.
-
-Echo is intended for trusted single-user development with fallible generated
-commands. Docker reduces accidental damage; it is not a guarantee against
-hostile code or kernel vulnerabilities.
-
-The model server and tool containers are separate. Only the host CLI controls
-Docker. Tool containers receive a disposable copy of repository files, never
-the original checkout, Docker socket, home directory, session database, or
-baseline Git metadata.
-
-Each tool call runs in a fresh container with:
-
-- Host user's non-root UID/GID, all capabilities dropped, no privilege escalation.
-- Read-only root filesystem and no network.
-- 1 GiB memory, two CPUs, 128 processes, and a maximum 120-second execution time.
-- 128 MiB temporary filesystem and 64 MiB maximum individual file size.
-- At most 32 KiB captured output; extra output is drained and discarded.
-
-Cancellation and timeout remove the entire tool container, including background
-processes. The disposable copy persists for resume. Read/write/edit paths must
-resolve inside the workspace. Bash can change anything in that copy.
-
-**Disk limitation:** the 512 MiB workspace limit is checked before and after
-execution; it is not a hard filesystem quota. A command can create many files
-before the next check and consume host disk. Run on a dedicated quota-limited
-filesystem or in a VM if hard aggregate disk isolation is required. Completed
-session workspaces also accumulate until removed manually.
-
-Docker shares the host kernel. A container escape remains possible. Docker
-group membership grants host-level administrative capability to the CLI user.
-The GPU inference service additionally needs NVIDIA devices and drivers.
-
-Git ignore rules are not a complete secrets filter. Review what is tracked and
-nonignored before opening a repository. Echo excludes symlinks and common
-credential directories, but cannot identify every sensitive file.
-
-Sandbox tools have no network access. `/apply` merges recorded agent edit and
-write changes into the original project; it excludes Bash file changes. Review
-`/diff` and run your project's checks before applying changes. Tests help detect
-mistakes but do not prove arbitrary generated code safe.
+See [Workspaces and file changes](workspaces-and-changes.md) for execution details and [Security in the README](../../README.md#security) for vulnerability reporting.

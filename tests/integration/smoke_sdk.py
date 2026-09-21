@@ -78,7 +78,7 @@ def main():
     parser.add_argument("--effort", choices=["low", "medium", "xhigh"])
     parser.add_argument("--no-thinking", action="store_true")
     args = parser.parse_args()
-    os.environ["ECHO_MODEL_PROFILE"] = f"models/{args.profile}.yaml"
+    os.environ["ECHO_MODEL_PROFILE"] = f"builtin:{args.profile}"
     config = Config.from_env()
     if args.effort:
         config = replace(config, reasoning_effort=args.effort)

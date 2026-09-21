@@ -213,7 +213,7 @@ export default function Home() {
               <h3>Configure your model and launch</h3>
               <p>
                 Follow the{" "}
-                <a href={`${repo}/blob/main/models/README.md`}>
+                <a href={`${repo}/blob/main/docs/guides/local-models.md`}>
                   model setup guide
                 </a>
                 , then start a session.

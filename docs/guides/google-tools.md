@@ -1,6 +1,8 @@
 # Google tools setup
 
-The repository includes a standalone example that signs into Google, saves your authorization, discovers spreadsheets in Drive, and reads spreadsheet tab metadata. It does not modify Google data or display spreadsheet contents.
+The ignored `local-dev/examples/google_smoke_test.py` development example signs into Google, saves your authorization, discovers spreadsheets in Drive, and reads spreadsheet tab metadata. It does not modify Google data or display spreadsheet contents.
+
+**Availability:** this personal example is not included in a fresh clone or the installed package. The commands below apply only to a checkout that already has it.
 
 **Current status:** the example works independently of Echo. Google agent tools and `echo-ai google auth/status/disconnect` are planned, not available commands. You do not need to start a model or run Docker for this example.
 
@@ -39,20 +41,20 @@ The example loads the root `.env`, expands `~`, and lets existing shell environm
 
 **The token file does not exist yet.** Google supplies the client credentials only. The example creates the token file and its parent directory after you complete browser login. Do not create an empty token file.
 
-Existing development setups can keep their private files in `scripts/`:
+Existing development setups can keep their private files in `local-dev/`:
 
 ```dotenv
-GOOGLE_CREDENTIALS_FILE=scripts/google_credentials.json
-GOOGLE_TOKEN_FILE=scripts/google_token.json
+GOOGLE_CREDENTIALS_FILE=local-dev/google_credentials.json
+GOOGLE_TOKEN_FILE=local-dev/google_token.json
 ```
 
-The example resolves relative paths from the checkout root. When the variables are unset, those `scripts/` paths are its fallback defaults. `.env` and `scripts/` are ignored by Git. Keep credential and token JSON files private regardless of where you store them; `.gitignore` does not remove files already tracked by Git.
+The example resolves relative paths from the checkout root. When the variables are unset, those `local-dev/` paths are its fallback defaults. `.env` and `local-dev/` are ignored by Git. Keep credential and token JSON files private regardless of where you store them; `.gitignore` does not remove files already tracked by Git.
 
 ## 3. Check configuration and sign in
 
 ```bash
-uv run --script examples/google_smoke_test.py --check-config
-uv run --script examples/google_smoke_test.py
+uv run --script local-dev/examples/google_smoke_test.py --check-config
+uv run --script local-dev/examples/google_smoke_test.py
 ```
 
 `uv` installs the example's dependencies into an isolated script environment; it does not change Echo's project dependencies. The first command checks local configuration without contacting Google. The second opens a browser and waits up to three minutes for you to sign in and approve access.
@@ -73,7 +75,7 @@ Smoke test complete. No Google data was changed.
 Counts vary by account. The example inspects the first spreadsheet returned by Drive unless you select one explicitly:
 
 ```bash
-uv run --script examples/google_smoke_test.py --spreadsheet-id YOUR_SPREADSHEET_ID
+uv run --script local-dev/examples/google_smoke_test.py --spreadsheet-id YOUR_SPREADSHEET_ID
 ```
 
 The ID is the segment between `/d/` and `/edit` in a spreadsheet URL. If Drive finds no spreadsheets, the example reports that the Sheets check was skipped. Create a blank spreadsheet in Google Sheets and run again with its ID.
@@ -85,7 +87,7 @@ Run the same command again. The example reuses the saved token and refreshes exp
 External apps in Testing receive refresh tokens that expire after seven days for these scopes. Reauthenticate when needed:
 
 ```bash
-uv run --script examples/google_smoke_test.py --reauth
+uv run --script local-dev/examples/google_smoke_test.py --reauth
 ```
 
 Tokens can also be revoked or expire for other reasons. Publishing an app is not required for this test and does not guarantee permanent tokens. See Google's [token expiration documentation](https://developers.google.com/identity/protocols/oauth2#expiration).

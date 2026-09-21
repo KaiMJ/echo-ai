@@ -48,11 +48,16 @@ The helper renders a synthetic session at 100 × 28 terminal cells through the r
 
 Deployment is a separate operation from building or committing. The existing deploy script builds the site and publishes it to the Cloudflare Pages project `echo-agent`.
 
-From `frontend/`, with the intended Cloudflare account and deployment credentials configured:
+Put `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` in the repository-root
+`.env`, as shown in the [frontend README](../../frontend/README.md#deploy-to-cloudflare-pages).
+The `cloudflare` script uses Node's env-file support to load that file for
+Wrangler; existing shell variables take precedence. CI can supply them directly
+without a local `.env`. No manual exports or browser login are needed when using
+a valid API token. From `frontend/`:
 
 ```bash
 # Once, if the project does not already exist:
-pnpm exec wrangler pages project create echo-agent --production-branch main
+pnpm run cloudflare pages project create echo-agent --production-branch main
 
 # Publish the site:
 pnpm run deploy

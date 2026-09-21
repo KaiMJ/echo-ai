@@ -20,6 +20,7 @@ from rich.console import Console
 from rich.prompt import Confirm
 
 from echo_ai.config import Config, load_theme, state_dir
+from echo_ai.config.file import config_path, environment_path
 from echo_ai.runtime.agent import Agent
 from echo_ai.runtime.locking import WorkspaceBusy
 from echo_ai.runtime.model import Model
@@ -194,7 +195,7 @@ async def chat(agent, root):
             await run_turn(agent, text)
 
 
-async def doctor(config, *, sandbox=False):
+async def status(config, *, sandbox=False):
     checks = []
     if sandbox:
         for label, command in (
@@ -212,7 +213,7 @@ async def doctor(config, *, sandbox=False):
         async with httpx.AsyncClient(timeout=5) as client:
             response = await client.get(
                 config.base_url.rstrip("/") + "/models",
-                headers={"Authorization": f"Bearer {os.getenv('ECHO_API_KEY', 'local')}"},
+                headers={"Authorization": f"Bearer {os.getenv(config.api_key_env, 'local')}"},
             )
             response.raise_for_status()
             entries = response.json()["data"]
@@ -228,7 +229,7 @@ async def doctor(config, *, sandbox=False):
                     )
                 )
     except (httpx.HTTPError, ValueError, KeyError):
-        checks.append((f"vLLM at {config.base_url}", False))
+        checks.append(("Model endpoint (check base_url and credentials with echo-ai setup --edit)", False))
     for label, good in checks:
         console.print(f"{'OK' if good else 'FAIL'}  {label}", markup=False)
     return 0 if all(good for _, good in checks) else 1
@@ -306,26 +307,51 @@ async def execute(args):
     from echo_ai.workspace.local import LocalWorkspace
     from echo_ai.workspace.sandbox import Sandbox
 
+    if args.command == "setup":
+        from echo_ai.config.setup import setup
+
+        path, saved = setup(edit=args.edit, reset=args.reset, path=args.path)
+        console.print(f"Configuration: {path}", markup=False)
+        if saved:
+            console.print(f"Backup: {saved}", markup=False)
+        console.print("Edit with echo-ai setup --edit; check the connection with echo-ai status.")
+        console.print("Setup preserves existing settings. No credentials were copied.")
+        if config_path().absolute() != path.absolute():
+            console.print(f"Runtime configuration override: {config_path().absolute()}", markup=False)
+        return 0
     config = Config.from_env()
     if getattr(args, "sandbox_image", None):
         if not getattr(args, "sandbox", False):
             raise ValueError("--sandbox-image requires --sandbox")
         config = replace(config, sandbox_image=args.sandbox_image)
     if args.command == "config":
-        path = Path(os.getenv("ECHO_CONFIG_FILE", "echo.yaml")).expanduser().resolve()
+        path = config_path().resolve()
         console.print(f"Config file: {path}", markup=False)
-        console.print("Edit this YAML file for new sessions. Environment and .env override YAML.")
+        console.print(f"Credential file: {environment_path().resolve()} (contents hidden)", markup=False)
+        console.print("YAML: explicit path > project echo.yaml > global echo.yaml > defaults; no merging.")
+        console.print("Shell variables override the selected credential file; both override YAML.")
+        overrides = sorted(name for name in os.environ if name.startswith("ECHO_"))
+        console.print(f"Environment override names: {', '.join(overrides) or '(none)'}", markup=False)
         console.print("Resumed sessions retain runtime settings; theme uses the current YAML.")
+        values = asdict(config)
+        # URLs may contain embedded passwords or query tokens. Do not print them.
+        values["base_url"] = "(configured; hidden)" if config.base_url else "(provider default)"
+        secret = os.getenv(config.api_key_env)
+        if secret:
+            values = {
+                key: value.replace(secret, "[redacted]") if isinstance(value, str) else value
+                for key, value in values.items()
+            }
         console.print_json(
             data={
-                **asdict(config),
+                **values,
                 "context_char_limit": config.context_char_limit,
                 "theme": asdict(load_theme()),
             }
         )
         return 0
-    if args.command in ("status", "doctor"):
-        return await doctor(config, sandbox=args.sandbox)
+    if args.command == "status":
+        return await status(config, sandbox=args.sandbox)
     root = state_dir()
     store = Store(root / "sessions.sqlite3")
     sandbox = None
@@ -540,9 +566,14 @@ def build_parser():
     p.add_argument(
         "--all", action="store_true", help="Include all repositories and review sessions"
     )
-    p = sub.add_parser("status", aliases=["doctor"], help="Check the model connection and limits")
+    p = sub.add_parser("status", help="Check the model connection and limits")
     p.add_argument("--sandbox", action="store_true", help="Also check Docker and the sandbox image")
     sub.add_parser("config", help="Show YAML path, precedence, and effective settings")
+    p = sub.add_parser("setup", help="Create or repair user configuration independently of the checkout")
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--edit", action="store_true", help="Edit with VISUAL/EDITOR; validate before saving")
+    group.add_argument("--reset", action="store_true", help="Restore starter settings, backing up the original")
+    p.add_argument("--path", type=Path, help="Explicit configuration to create/edit instead of global settings")
     return parser
 
 

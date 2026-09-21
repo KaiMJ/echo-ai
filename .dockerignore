@@ -1,6 +1,7 @@
 .git
 .venv
 scripts
+local-dev
 __pycache__
 .pytest_cache
 .ruff_cache
@@ -9,3 +10,9 @@ __pycache__
 .env
 .env.*
 !.env.example
+local-dev
+
+# The sandbox image uses only Python dependency metadata and its tool runner.
+frontend
+.echo
+dist
