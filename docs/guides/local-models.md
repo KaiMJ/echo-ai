@@ -1,51 +1,38 @@
 # Local models
 
-Host Qwen or Gemma locally with vLLM using Echo’s packaged templates.
-**Skip this guide if you already have a model server.**
+Host Qwen or Gemma with Echo's vLLM templates. Skip this guide if you use a cloud
+provider or already have a model server.
 
 ## Start a server
 
 Requires Docker with NVIDIA GPU support and downloaded model weights. The helper
-validates existing weights; it does not download them. Review the selected profile's
-GPU and context settings for your hardware before starting.
-
-From the Echo checkout:
+validates weights but does not download them. From the Echo checkout:
 
 ```bash
 uv sync --locked
 test -e .env || cp .env.example .env
+uv run python scripts/deploy_local_model.py models
 ```
 
-Edit `.env` and set `ECHO_HF_HUB_CACHE` to your Hugging Face hub cache directory.
-The cache must contain the model revision specified in the packaged `qwen.yaml` or `gemma.yaml` template.
-Then start a model:
+`models` lists model IDs, pinned revisions, GPU requirements, and cache variables.
+Review these against your hardware. Set `ECHO_HF_HUB_CACHE` in `.env` to the Hugging
+Face hub cache containing the selected revision, then run:
 
 ```bash
-uv run python scripts/deploy_local_model.py models
 uv run python scripts/deploy_local_model.py qwen check
 uv run python scripts/deploy_local_model.py qwen up
 ```
 
-Use `gemma` instead of `qwen` for Gemma. Both use the same inference service;
-starting one replaces the other. `models` lists the model IDs, pinned revisions,
-GPU counts, and cache variables without requiring Docker or a configured cache.
+Use `gemma` instead of `qwen` for Gemma. Both share one inference service;
+starting one replaces the other. Startup waits up to 1,200 seconds; use
+`qwen up --wait-timeout 1800` to allow longer.
 
 ## Connect Echo
 
-Launch Echo and use `/model` to select Qwen or Gemma. Set the endpoint in the
-picker to your server URL, or leave it empty to use `ECHO_INFERENCE_PORT`
-(default `http://127.0.0.1:8001/v1`). Save before checking `echo-ai status`.
-
-From your target project:
-
-```bash
-echo-ai
-# After saving your selection in /model:
-echo-ai status
-```
-
-An optional project `echo.yaml` overrides the global YAML settings.
-See [configuration](configuration.md) for local development.
+Run `echo-ai` from your project and open `/model`. Select Qwen or Gemma, set the
+endpoint, and save for this session and future sessions. An empty endpoint uses
+`ECHO_INFERENCE_PORT`, defaulting to `http://127.0.0.1:8001/v1`.
+Run `echo-ai status` from another terminal to check the saved connection.
 
 ## Manage the server
 
@@ -55,44 +42,30 @@ uv run python scripts/deploy_local_model.py logs
 uv run python scripts/deploy_local_model.py stop
 ```
 
-These controls act on the shared server and do not require a model name or model
-cache configuration. Existing commands such as `qwen status` still work.
-`status` also shows stopped containers. Logs follow the server by default; use
-`logs --no-follow --tail 200` to print recent output and exit. Ctrl-C exits the
-log viewer without stopping the server.
+These commands act on the shared server without requiring a model name or cache
+configuration. Logs follow by default; use `logs --no-follow --tail 200` for recent
+output. Ctrl-C exits the log viewer without stopping the server.
 
-Startup waits up to 1,200 seconds for readiness; change this with
-`qwen up --wait-timeout 1800`. If startup fails or times out, inspect `status` and
-`logs --no-follow`; the container may still be running. Use `stop` to stop it.
-
-Use `--env-file /path/to/.env` to select an environment file explicitly (otherwise
-`ECHO_ENV_FILE`, then the checkout's `.env`, is used). Shell environment variables
-take precedence. The default `.env` is optional if the required variables are
-already exported; an explicitly selected file must exist.
-
-Run without arguments or with `--help` for usage examples.
-
-Use `check` to validate weights and Compose configuration without starting the
-server, or `config` to inspect the generated Compose configuration.
+If startup fails or times out, check `status` and `logs --no-follow`. The container
+may still be running; use `stop` to stop it.
 
 ## Custom settings
 
-Presets live in `src/echo_ai/config/presets/`; both Echo and the
-launcher read them directly. There is no separate repository or user `models/`
-folder to maintain. Built-in defaults follow the installed package version;
-resumed sessions retain their saved runtime settings.
+The launcher reads `--env-file /path/to/.env`, then `ECHO_ENV_FILE`, then the
+checkout's optional `.env`. Shell variables take precedence. An explicitly selected
+file must exist.
 
-Put request overrides under `local-model` in your `echo.yaml`. For custom GPU or
-server settings, copy a template to a file you own and pass it explicitly:
+For custom GPU or server settings, copy and edit a packaged template:
 
 ```bash
 cp src/echo_ai/config/presets/qwen.yaml ./my-model.yaml
-# Edit my-model.yaml for your hardware, then:
 uv run python scripts/deploy_local_model.py qwen up --profile ./my-model.yaml
 ```
 
-Use `/model` to set the same model ID and token limits in Echo so client and
-server limits agree. Server changes require restarting
-inference. Model weights stay in your external cache.
+Use `/model` to set matching model IDs and token limits in Echo. Request overrides
+can also go under `local-model` in `echo.yaml`. Server changes require restarting
+inference; weights stay in your external cache.
 
-See [model verification](../development/model-verification.md) for integration checks.
+Use `--help` for command options, `check` to validate without starting, or `config`
+to inspect generated Compose configuration. For development checks, see
+[Model verification](../development/model-verification.md).

@@ -10,7 +10,7 @@ This is an implementation plan. The commands, environment-variable handling, mod
 
 ## Current user workflow
 
-The [Google tools guide](../guides/google-tools.md) documents the ignored local example at `local-dev/examples/google_smoke_test.py`. It is available only in development checkouts that have that file, not in a fresh clone or installed package.
+The [private Google tools example](google-tools-example.md) documents the ignored local example at `local-dev/examples/google_smoke_test.py`. It is available only in development checkouts that have that file, not in a fresh clone or installed package.
 
 The example performs Drive discovery and Sheets metadata reads. It is not yet connected to Echo's agent loop and does not implement the CLI commands below. Its environment variables are supported by the example; runtime configuration still needs implementation.
 

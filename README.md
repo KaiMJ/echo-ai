@@ -20,31 +20,33 @@ Requires Linux, Python 3.12+, [uv](https://docs.astral.sh/uv/), Git, Bash, and r
 git clone https://github.com/KaiMJ/echo-ai.git
 cd echo-ai
 uv tool install --from . echo-ai
-echo-ai setup --edit
+echo-ai setup
 ```
 
-Configure an existing server, or follow the [local deployment instructions](docs/guides/local-models.md).
-Then open your project:
+For a cloud model, add your API key to `~/.config/echo-ai/.env` (for xAI,
+`XAI_API_KEY=your-key`). For a local model, start your server or follow
+[Local models](docs/guides/local-models.md). Then open your project:
 
 ```bash
 cd /path/to/your-project
-echo-ai status
 echo-ai
 ```
 
+Use `/model` to select your provider, model, and endpoint, then save for this
+session and future sessions.
+
 Settings live in `~/.config/echo-ai/` (or `$XDG_CONFIG_HOME/echo-ai/`).
 See [Getting started](docs/guides/getting-started.md) for the first-run guide and
-[Configuration](docs/guides/configuration.md) for credentials, repairs, and local development.
+[Configuration](docs/guides/configuration.md) for settings and troubleshooting.
 
 ## Documentation
 
 - [User guides](docs/guides/README.md): setup and available workflows.
-- [Google tools setup](docs/guides/google-tools.md): notes for a private development example. Google agent tools are still planned.
+- [Everyday use](docs/guides/everyday-use.md): sessions, reviewing edits, and sandbox mode.
 - [Development documentation](docs/development/README.md): current architecture, implementation plans, and experiments.
-- [Security essentials](docs/guides/security.md): execution risks, data privacy, and approvals.
 
 ## Security
 
-Echo runs commands with your permissions by default. Review actions before approving them; `--sandbox` reduces risk but does not guarantee isolation from malicious code. See [Security essentials](docs/guides/security.md).
+Echo runs commands with your permissions by default. Review actions before approving them; `--sandbox` reduces risk but does not guarantee isolation from malicious code. See [Safety](docs/guides/everyday-use.md#safety).
 
 Report vulnerabilities privately through **Security → Report a vulnerability** on [GitHub](https://github.com/KaiMJ/echo-ai/security), if available. Otherwise, open an issue asking for a private contact without sharing exploit details, credentials, or private data.

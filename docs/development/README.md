@@ -6,13 +6,23 @@ For the website, see [Landing-page development](landing-page.md), including loca
 
 For local inference checks and reasoning settings, see [Model verification](model-verification.md).
 
-See the [public security and usability review](public-readiness-review.md) for findings, validation, and remaining release checks.
+## Development setup
+
+`uv run echo-ai` runs the checkout; an installed `echo-ai` uses its separately
+installed copy. To keep development sessions and settings separate, set
+`ECHO_STATE_DIR` to a scratch directory and `XDG_CONFIG_HOME` to a separate config
+directory. The checkout's optional `.env` is ignored by Git; use `.env.example`
+as a starting point. The local model launcher also reads it for cache paths and ports.
+
+Bundled defaults live in `src/echo_ai/config/presets/`: `echo.yaml` supplies the
+setup configuration; `gemma.yaml`, `qwen.yaml`, and `xai.yaml` supply model presets.
+Users do not need to copy or edit these files.
 
 ## Integration plans
 
 These documents describe proposed implementation work. They do not imply that the described commands or tools are available.
 
-- [Google tools integration](google-tools-integration.md)
+- [Google tools integration](google-tools-integration.md), with a [private development example](google-tools-example.md) unavailable in fresh clones
 - [Web research and browser use](web-and-computer-use-architecture.md)
 - [Web search](web-search-plan.md)
 

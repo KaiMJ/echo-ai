@@ -153,7 +153,7 @@ export default function Home() {
                 recorded agent edits, then apply them back to your checkout when
                 you’re ready.
               </p>
-              <a className="text-link" href={`${guides}/workspaces-and-changes.md`}>
+              <a className="text-link" href={`${guides}/everyday-use.md#sandbox-mode`}>
                 Read about sandbox mode <span aria-hidden="true">↗</span>
               </a>
             </div>

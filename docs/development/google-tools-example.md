@@ -1,4 +1,4 @@
-# Google tools setup
+# Private Google tools example
 
 The ignored `local-dev/examples/google_smoke_test.py` development example signs into Google, saves your authorization, discovers spreadsheets in Drive, and reads spreadsheet tab metadata. It does not modify Google data or display spreadsheet contents.
 
@@ -106,4 +106,4 @@ Tokens can also be revoked or expire for other reasons. Publishing an app is not
 
 To disconnect, remove the app's access in your [Google Account connections](https://myaccount.google.com/connections), then delete the local file configured by `GOOGLE_TOKEN_FILE`. Deleting the local file alone does not revoke the authorization at Google. Keep the downloaded client file if you want to reconnect later.
 
-For implementation details and planned agent tools, see [Google tools integration](../development/google-tools-integration.md).
+For implementation details and planned agent tools, see [Google tools integration](google-tools-integration.md).

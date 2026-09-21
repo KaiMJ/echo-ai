@@ -1,13 +1,9 @@
 # User guides
 
-These guides cover workflows available in the repository today.
+Start with [Getting started](getting-started.md) to install Echo and send your first prompt.
 
-- [Getting started](getting-started.md): install, configure, and run Echo.
-- [Configuration](configuration.md): credentials, repairs, and separate development settings.
-- [Sessions](sessions.md): resume conversations and inspect changes.
-- [Google tools setup](google-tools.md): notes for the private development example; not included in fresh clones.
-- [Workspaces and file changes](workspaces-and-changes.md): local and sandbox behavior, checkpoints, and undo/apply.
-- [Execution modes and security](security.md): permissions, isolation boundaries, and limits.
+- [Everyday use](everyday-use.md): sessions, reviewing and undoing edits, sandbox mode, and safety.
+- [Configuration](configuration.md): settings, credentials, and troubleshooting.
+- [Local models](local-models.md): host Qwen or Gemma with Docker and vLLM.
 
-For model deployment, see the [local model guide](local-models.md).
-For architecture and planned features, see [Development documentation](../development/README.md).
+For architecture, development setup, and experiments, see [Development documentation](../development/README.md).
