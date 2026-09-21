@@ -39,6 +39,23 @@ class Store:
                 patch TEXT NOT NULL,
                 checkout TEXT,
                 created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+            CREATE TABLE IF NOT EXISTS model_calls (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES sessions(id),
+                run_id TEXT NOT NULL REFERENCES runs(id),
+                config TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'running',
+                usage TEXT NOT NULL DEFAULT '{}',
+                created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+            CREATE INDEX IF NOT EXISTS model_calls_session ON model_calls(session_id);
+            CREATE INDEX IF NOT EXISTS model_calls_run ON model_calls(run_id);
+            CREATE TABLE IF NOT EXISTS model_events (
+                id INTEGER PRIMARY KEY,
+                call_id TEXT NOT NULL REFERENCES model_calls(id),
+                kind TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now')));
+            CREATE INDEX IF NOT EXISTS model_events_call ON model_events(call_id, id);
         """)
 
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(sessions)")}
@@ -185,6 +202,57 @@ class Store:
             )
         return result.rowcount == 1
 
+    def update_config(self, key, config):
+        previous = json.loads(self.session(key)["config"])
+        identity = f"{previous.get('provider', 'hosted_vllm')}/{previous.get('model', '')}"
+        with self.db:
+            # Attribute legacy reasoning before changing the session's active model.
+            self.db.execute(
+                "UPDATE messages SET payload=json_set(payload, '$._echo_model', ?) "
+                "WHERE session_id=? AND json_extract(payload, '$.role')='assistant' "
+                "AND json_extract(payload, '$._echo_model') IS NULL", (identity, key),
+            )
+            self.db.execute(
+                "UPDATE sessions SET config=?,updated=strftime('%Y-%m-%d %H:%M:%f','now') "
+                "WHERE id=?", (json.dumps(config), key),
+            )
+
+    def start_model_call(self, session_id, run_id, config):
+        key = uuid.uuid4().hex
+        with self.db:
+            self.db.execute(
+                "INSERT INTO model_calls(id,session_id,run_id,config) VALUES(?,?,?,?)",
+                (key, session_id, run_id, json.dumps(config)),
+            )
+        return key
+
+    def add_model_event(self, call_id, kind, value):
+        payload = json.dumps(value)
+        with self.db:
+            self.db.execute(
+                "INSERT INTO model_events(call_id,kind,payload) VALUES(?,?,?)",
+                (call_id, kind, payload),
+            )
+            if kind == "usage":
+                self.db.execute("UPDATE model_calls SET usage=? WHERE id=?", (payload, call_id))
+            elif kind == "end":
+                self.db.execute(
+                    "UPDATE model_calls SET status=? WHERE id=?", (value["status"], call_id),
+                )
+
+    def model_calls(self, session_id):
+        return [dict(row) for row in self.db.execute(
+            "SELECT * FROM model_calls WHERE session_id=? ORDER BY rowid", (session_id,),
+        )]
+
+    def model_events(self, call_id):
+        return [
+            {"event": row["kind"], "data": json.loads(row["payload"]), "time": row["created"]}
+            for row in self.db.execute(
+                "SELECT * FROM model_events WHERE call_id=? ORDER BY id", (call_id,),
+            )
+        ]
+
     def add(self, key: str, message: dict):
         with self.db:
             head = self.db.execute(
@@ -219,6 +287,32 @@ class Store:
 
     def active_head(self, key):
         return self.session(key)["active_head"]
+
+    def discard_input(self, key, head):
+        """Remove an unaccepted input, preserving diagnostic calls and other branches."""
+        row = self.db.execute(
+            "SELECT parent_id,payload FROM messages WHERE id=? AND session_id=?", (head, key),
+        ).fetchone()
+        if row is None or json.loads(row["payload"]).get("role") != "user":
+            return
+        parent = row["parent_id"]
+        with self.db:
+            self.db.execute("UPDATE messages SET parent_id=? WHERE parent_id=?", (parent, head))
+            for column in ("active_head", "redo_head"):
+                self.db.execute(
+                    f"UPDATE sessions SET {column}=? WHERE id=? AND {column}=?", (parent, key, head),
+                )
+            for column in ("start_head", "end_head"):
+                self.db.execute(
+                    f"UPDATE runs SET {column}=? WHERE session_id=? AND {column}=?", (parent, key, head),
+                )
+            self.db.execute("DELETE FROM messages WHERE id=? AND session_id=?", (head, key))
+            remaining = self.db.execute(
+                "SELECT payload FROM messages WHERE session_id=? "
+                "AND json_extract(payload,'$.role')='user' ORDER BY id LIMIT 1", (key,),
+            ).fetchone()
+            title = " ".join(json.loads(remaining[0]).get("content", "").split())[:80] if remaining else ""
+            self.db.execute("UPDATE sessions SET title=? WHERE id=?", (title, key))
 
     def move_head(self, key, head, *, redo=None):
         if head is not None and self.db.execute(
@@ -322,6 +416,24 @@ class Store:
 
     def recover(self, key: str):
         """Close incomplete tool exchanges without executing their commands again."""
+        # Older versions saved missing-key submissions as unknown-cost calls.
+        rejected = self.db.execute(
+            "SELECT DISTINCT c.id,r.start_head FROM model_calls c JOIN runs r ON r.id=c.run_id "
+            "JOIN model_events e ON e.call_id=c.id AND e.kind='end' "
+            "WHERE c.session_id=? AND c.status='failed' "
+            "AND json_extract(e.payload,'$.error') LIKE 'Missing %' "
+            "AND NOT EXISTS (SELECT 1 FROM model_events sent WHERE sent.call_id=c.id "
+            "AND sent.kind IN ('request','chunk')) "
+            "AND NOT EXISTS (SELECT 1 FROM model_calls accepted WHERE accepted.run_id=c.run_id "
+            "AND accepted.status='completed')", (key,),
+        ).fetchall()
+        for row in rejected:
+            self.discard_input(key, row["start_head"])
+            with self.db:
+                self.db.execute(
+                    "UPDATE model_calls SET status='rejected',usage=? WHERE id=?",
+                    (json.dumps({"cost_usd": 0.0, "cost_source": "rejected"}), row["id"]),
+                )
         messages = self.messages(key)
         pending = {}
         for message in messages:
@@ -344,9 +456,42 @@ class Store:
             )
         with self.db:
             self.db.execute(
+                "UPDATE model_calls SET status='interrupted' WHERE session_id=? AND status='running'",
+                (key,),
+            )
+            self.db.execute(
                 "UPDATE runs SET status='interrupted' WHERE session_id=? AND status='running'",
                 (key,),
             )
 
     def close(self):
         self.db.close()
+
+    def session_cost(self, key):
+        family = (
+            "WITH RECURSIVE family(id) AS (SELECT id FROM sessions WHERE id=? "
+            "UNION ALL SELECT s.id FROM sessions s JOIN family f ON s.parent_id=f.id) "
+        )
+        total, estimated, unknown = 0.0, 0, 0
+        for row in self.db.execute(
+            family + "SELECT usage FROM model_calls WHERE session_id IN (SELECT id FROM family)",
+            (key,),
+        ):
+            usage = json.loads(row[0])
+            cost = usage.get("cost_usd")
+            total += cost if cost is not None else 0
+            estimated += usage.get("cost_source") == "estimated"
+            unknown += cost is None
+        # Retain totals from older runs that predate SQLite model-call records.
+        rows = self.db.execute(
+            family + "SELECT metrics FROM runs WHERE session_id IN (SELECT id FROM family) "
+            "AND NOT EXISTS (SELECT 1 FROM model_calls WHERE run_id=runs.id)", (key,),
+        )
+        for row in rows:
+            metrics = json.loads(row[0])
+            total += metrics.get("cost_usd", 0)
+            estimated += metrics.get("estimated_cost_calls", 0)
+            unknown += metrics.get("unknown_cost_calls", 0)
+            if "cost_usd" not in metrics:
+                unknown += metrics.get("model_calls", 0)
+        return total, estimated, unknown

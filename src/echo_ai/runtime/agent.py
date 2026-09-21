@@ -11,6 +11,7 @@ from jsonschema import ValidationError, validate
 from echo_ai.runtime.model import request_messages
 from echo_ai.runtime.permissions import Permissions
 from echo_ai.runtime.tools import DELEGATE, tools_for
+from echo_ai.runtime.tracing import Trace
 
 SYSTEM = """You are Echo, a coding agent working in a disposable Docker workspace.
 Inspect relevant files before editing. Make the smallest correct change. Run relevant tests.
@@ -36,6 +37,8 @@ class Agent:
         self.budget = budget
         self.permissions = Permissions()
         self._shared_budget = budget
+        self.running = False
+        self.store.recover(session_id)
         self.tools = [
             t
             for t in tools_for(model.config)
@@ -44,7 +47,38 @@ class Agent:
         if not child:
             self.tools = self.tools + [DELEGATE]
 
+    def update_model(self, config, *, make_default=True):
+        if self.running:
+            raise ValueError("Wait for the current turn to finish before changing model settings.")
+        from echo_ai.config.preferences import save_preferences
+
+        if make_default:
+            save_preferences(config)
+        self.store.update_config(self.session_id, asdict(config))
+        self.model.config = config
+
     async def run(self, prompt: str) -> dict:
+        if self.running:
+            raise ValueError("A turn is already running.")
+        self.running = True
+        try:
+            try:
+                check_ready = getattr(self.model, "check_ready", None)
+                if check_ready is not None:
+                    check_ready()
+            except (ValueError, RuntimeError, OSError):
+                self.reject_input(prompt)
+                raise
+            return await self._run(prompt)
+        finally:
+            self.running = False
+
+    def reject_input(self, prompt):
+        history = self.store.messages(self.session_id)
+        chars = len(json.dumps(history)) if any(m["role"] == "user" for m in history) else 0
+        self.emit("input_rejected", {"prompt": prompt, "context_chars": chars})
+
+    async def _run(self, prompt: str) -> dict:
         config = self.model.config
         if self._shared_budget is None:
             self.budget = {"remaining": config.max_steps}
@@ -72,6 +106,8 @@ class Agent:
                 },
             )
         self.store.add(self.session_id, {"role": "user", "content": prompt})
+        input_head = self.store.active_head(self.session_id)
+        accepted = False
         run_id = self.store.start(self.session_id)
         started = time.monotonic()
         metrics = {
@@ -82,10 +118,14 @@ class Agent:
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "ttft": None,
+            "cost_usd": 0.0,
+            "estimated_cost_calls": 0,
+            "unknown_cost_calls": 0,
         }
         status = "failed"
         messages = request_messages(
-            self.store.messages(self.session_id), return_reasoning=config.return_reasoning
+            self.store.messages(self.session_id), return_reasoning=config.return_reasoning,
+            model_identity=f"{config.provider}/{config.model}",
         )
         sync_workspace = bool(self.store.session(self.session_id)["needs_workspace_sync"])
         if sync_workspace:
@@ -117,17 +157,27 @@ class Agent:
                         "max_steps": config.max_steps,
                     },
                 )
-                message, usage = await self.model.complete(messages, self.tools, self.emit)
+                trace = Trace(self.store, self.session_id, run_id, config)
+                metrics["model_calls"] += 1
+                try:
+                    with trace:
+                        message, usage = await self.model.complete(messages, self.tools, self.emit)
+                finally:
+                    cost = trace.usage.get("cost_usd")
+                    metrics["cost_usd"] += cost if cost is not None else 0
+                    metrics["estimated_cost_calls"] += trace.usage.get("cost_source") == "estimated"
+                    metrics["unknown_cost_calls"] += cost is None
                 if sync_workspace:
                     self.store.clear_workspace_sync(self.session_id)
                     sync_workspace = False
-                metrics["model_calls"] += 1
                 if metrics["ttft"] is None:
                     metrics["ttft"] = usage.get("ttft")
                 for name in ("prompt_tokens", "completion_tokens"):
                     metrics[name] += usage.get(name, 0)
                 self.emit("model_end", {"usage": usage, "metrics": dict(metrics)})
+                message["_echo_model"] = f"{config.provider}/{config.model}"
                 self.store.add(self.session_id, message)
+                accepted = True
                 messages.extend(
                     request_messages([message], return_reasoning=config.return_reasoning)
                 )
@@ -237,6 +287,9 @@ class Agent:
             status = "cancelled"
             raise
         finally:
+            if not accepted:
+                self.store.discard_input(self.session_id, input_head)
+                self.reject_input(prompt)
             metrics["seconds"] = time.monotonic() - started
             self.store.finish(run_id, status, metrics)
             self.store.recover(self.session_id)

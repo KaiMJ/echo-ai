@@ -1,28 +1,52 @@
-"""Runtime defaults and validation, independent of files and the terminal UI."""
+"""Typed settings and validation; startup model tuning comes from packaged presets."""
 
 import math
 from dataclasses import dataclass, fields
+from dataclasses import field as setting_field
+from functools import lru_cache
+from importlib.resources import files
+
+import yaml
+
+DEFAULT_PROFILE = "gemma"
+
+
+@lru_cache
+def default_profile():
+    resource = files("echo_ai.config") / "presets" / f"{DEFAULT_PROFILE}.yaml"
+    return yaml.safe_load(resource.read_text())
+
+
+def preset_setting(name, fallback=None):
+    return setting_field(default_factory=lambda: default_profile().get(name, fallback))
 
 
 @dataclass(frozen=True)
-class RuntimeSettings:
-    base_url: str = "http://127.0.0.1:8001/v1"
-    model: str = "cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit"
-    provider: str = "hosted_vllm"
-    api_key_env: str = "ECHO_API_KEY"
-    request_format: str = "vllm"
-    reasoning_effort: str = ""
-    preserve_thinking: bool = False
+class ModelSettings:
+    base_url: str = preset_setting("base_url", "http://127.0.0.1:8001/v1")
+    model: str = preset_setting("model")
+    provider: str = preset_setting("provider")
+    api_key_env: str = preset_setting("api_key_env", "ECHO_API_KEY")
+    request_format: str = preset_setting("request_format")
+    reasoning_effort: str = preset_setting("reasoning_effort", "")
+    preserve_thinking: bool = preset_setting("preserve_thinking", False)
+    max_tokens: int = preset_setting("max_tokens")
+    context_tokens: int = preset_setting("context_tokens")
+    max_context_chars: int | None = preset_setting("max_context_chars")
+    timeout: float = preset_setting("timeout")
+    temperature: float = preset_setting("temperature")
+    top_p: float = preset_setting("top_p")
+    top_k: int = preset_setting("top_k")
+    reasoning_enabled: bool = preset_setting("reasoning_enabled")
+    return_reasoning: bool = preset_setting("return_reasoning")
+
+
+MODEL_FIELDS = frozenset(field.name for field in fields(ModelSettings))
+
+
+@dataclass(frozen=True)
+class RuntimeSettings(ModelSettings):
     max_steps: int = 20
-    max_tokens: int = 16384
-    context_tokens: int = 262144
-    max_context_chars: int | None = None
-    timeout: float = 180
-    temperature: float = 1.0
-    top_p: float = 0.95
-    top_k: int = 64
-    reasoning_enabled: bool = True
-    return_reasoning: bool = False
     max_workspace_bytes: int = 512 * 1024 * 1024
     max_output_bytes: int = 32768
     max_write_bytes: int = 1024 * 1024

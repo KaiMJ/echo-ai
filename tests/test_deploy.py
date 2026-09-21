@@ -173,7 +173,7 @@ def test_up_uses_timeout_and_prints_matching_connection(cli, monkeypatch, capsys
     assert calls[0][1]["input"] == "override"
     output = capsys.readouterr().out
     assert "ECHO_BASE_URL=http://127.0.0.1:8123/v1" in output
-    assert "ECHO_MODEL_PROFILE=builtin:qwen" in output
+    assert "choose qwen in /model" in output
     assert "ECHO_ENV_FILE=" not in output
 
 

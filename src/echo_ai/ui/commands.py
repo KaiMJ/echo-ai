@@ -26,6 +26,7 @@ COMMANDS = {
     "/help": "List commands",
     "/new": "Start a fresh session in this repository",
     "/status": "Show session, execution mode, and token usage",
+    "/model": "Choose model, reasoning, and default settings (F4)",
     "/yolo": "Allow tools without asking until /default or exit",
     "/default": "Ask before bash, write, and edit calls",
     "/sessions": "List sessions for this repository",
@@ -85,7 +86,7 @@ def session_rows_panel(rows, *, current=None, theme=None, clickable=False):
 
 
 def status_rows(agent, renderer):
-    return [
+    rows = [
         ("Session", agent.session_id),
         ("Mode", getattr(agent.sandbox, "mode", "sandbox")),
         ("Permissions", "YOLO" if agent.permissions.yolo else "Default"),
@@ -93,6 +94,23 @@ def status_rows(agent, renderer):
         ("Context", renderer.active_context_text()),
         ("Generation", renderer.active.generated_text(detailed=True)),
     ]
+    config = getattr(getattr(agent, "model", None), "config", None)
+    if config is not None:
+        rows.insert(1, ("Model", f"{config.provider}/{config.model}"))
+        rows.insert(2, ("Reasoning", config.reasoning_effort or (
+            "default" if config.reasoning_enabled else "off"
+        )))
+    if hasattr(agent, "store") and hasattr(agent.store, "session_cost"):
+        total, estimated, unknown = agent.store.session_cost(agent.session_id)
+        from echo_ai.runtime.pricing import format_cost
+
+        detail = format_cost(total, estimated=bool(estimated))
+        if estimated:
+            detail += f"; {estimated} estimated calls"
+        if unknown:
+            detail += f"; {unknown} calls with unknown cost"
+        rows.append(("Session API cost", detail))
+    return rows
 
 
 def status_text(agent, renderer):

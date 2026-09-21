@@ -1,0 +1,13 @@
+# Echo user configuration. Environment variables override these settings.
+# Choose a model with /model; preferences are saved in the state directory as model.yaml.
+# Omitted settings use the built-in defaults.
+
+sandbox:
+  sandbox_image: echo-ai-sandbox:local
+  # Sizes are bytes; CPU limits are cores.
+  max_workspace_bytes: 536870912 # 512 MiB
+  sandbox_pids: 128
+  sandbox_memory_bytes: 1073741824 # 1 GiB
+  sandbox_cpus: 2.0
+  sandbox_file_bytes: 67108864 # 64 MiB
+  sandbox_tmp_bytes: 134217728 # 128 MiB

@@ -134,8 +134,12 @@ def positive_int(value):
     return number
 
 
+def local_model_names():
+    return [name for name in builtin_profile_names() if read_model_profile(f"builtin:{name}")[1]]
+
+
 def list_models():
-    for name in builtin_profile_names():
+    for name in local_model_names():
         runtime, server = read_model_profile(f"builtin:{name}")
         gpus = server["tensor_parallel_size"] * server["pipeline_parallel_size"]
         print(f"{name}: {runtime['model']}")
@@ -183,9 +187,9 @@ Weights must already be downloaded. See docs/guides/local-models.md.
         return
     if args.action:
         model, action = args.target, args.action
-        if model not in builtin_profile_names():
+        if model not in local_model_names():
             parser.error(
-                f"unknown model {model!r}; choose from {', '.join(builtin_profile_names())}"
+                f"unknown model {model!r}; choose from {', '.join(local_model_names())}"
             )
     else:
         model, action = None, args.target
@@ -256,14 +260,14 @@ Weights must already be downloaded. See docs/guides/local-models.md.
     if action == "check":
         print("Check passed: model files and Compose configuration are valid.")
     elif action == "up":
-        profile_name = str(profile) if profile else f"builtin:{model}"
         endpoint = f"http://127.0.0.1:{os.getenv('ECHO_INFERENCE_PORT', '8001')}/v1"
         print(f"Server ready: {endpoint}")
         env_prefix = f"ECHO_ENV_FILE={shlex.quote(str(env_file))} " if env_file.is_file() else ""
         print(
-            f"For Echo: {env_prefix}ECHO_MODEL_PROFILE={shlex.quote(profile_name)} "
+            f"For Echo: {env_prefix}"
             f"ECHO_BASE_URL={shlex.quote(endpoint)} uv run echo-ai"
         )
+        print(f"Then choose {model} in /model and match the server model ID and token limits.")
 
 
 if __name__ == "__main__":

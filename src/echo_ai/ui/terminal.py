@@ -17,10 +17,11 @@ from prompt_toolkit.formatted_text import ANSI, to_formatted_text
 from prompt_toolkit.formatted_text.utils import split_lines
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
-from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.key_binding import ConditionalKeyBindings, KeyBindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import (
     ConditionalContainer,
+    DynamicContainer,
     Float,
     FloatContainer,
     HSplit,
@@ -52,6 +53,7 @@ from echo_ai.ui.commands import (
     status_panel,
     status_text,
 )
+from echo_ai.ui.model_settings import ModelSettings
 from echo_ai.ui.renderer import safe_text
 
 # prompt_toolkit has no Ctrl+Shift+letter key token. Reserve F24 internally for
@@ -525,6 +527,7 @@ class TerminalChat:
         self.approval = None
         self.approval_correction = False
         self.pending_session = None
+        self.model_settings = None
         if not hasattr(agent, "permissions"):
             agent.permissions = Permissions()
         agent.permissions.ask = self.ask_permission
@@ -708,6 +711,11 @@ class TerminalChat:
             else:
                 self.app.exit()
 
+        @keys.add("f4")
+        def settings(event):
+            if not self.busy and self.approval is None and self.pending_session is None:
+                self.open_model_settings()
+
         status = Window(FormattedTextControl(self.status), height=1, style="class:muted")
         permission_panel = Frame(
             HSplit([
@@ -767,12 +775,18 @@ class TerminalChat:
             body,
             floats=[
                 Float(content=popup, left=2, right=2, top=2, bottom=2),
+                Float(content=ConditionalContainer(
+                    DynamicContainer(lambda: self.model_settings or Window()),
+                    filter=Condition(lambda: self.model_settings is not None),
+                ), left=2, right=2),
                 Float(xcursor=True, ycursor=True, content=CompletionsMenu(max_height=10)),
             ],
         )
         self.app = Application(
             layout=Layout(layout, focused_element=self.editor),
-            key_bindings=keys,
+            key_bindings=ConditionalKeyBindings(
+                keys, filter=Condition(lambda: self.model_settings is None),
+            ),
             full_screen=True,
             mouse_support=Condition(lambda: not self.copy_mode),
             input=input,
@@ -846,7 +860,7 @@ class TerminalChat:
     def install_resize_handlers(self, app):
         """Capture dragging across panes, using terminal coordinates throughout."""
         info = self.editor.window.render_info
-        if info is None or self.selected or self.copy_mode or self.approval is not None or self.pending_session is not None:
+        if info is None or self.selected or self.copy_mode or self.approval is not None or self.pending_session is not None or self.model_settings is not None:
             self.resize_drag = None
             return
         handlers = app.renderer.mouse_handlers
@@ -907,6 +921,7 @@ class TerminalChat:
         if not parts:
             parts.append("Session " + safe_text(self.agent.session_id)[:8])
         parts.append("/status details")
+        parts.append("F4 /model")
         return " " * self.side_padding() + fit_text(" · ".join(parts), width - self.side_padding() * 2)
 
     def spinner(self):
@@ -983,7 +998,9 @@ class TerminalChat:
         roomy = self.roomy_header()
         orb = orb_frame(time.monotonic()) if self.busy and roomy else None
         model = safe_text(self.renderer.model) or "Local coding agent"
-        left_rows = ["echo.", fit_text(model, max(1, available - 28)), ""] if roomy else ["echo."]
+        cost = "Turn API: " + self.renderer.cost_text()
+        left_rows = ["echo.", fit_text(model, max(1, available - 28)),
+                     fit_text(cost, max(1, available - 28))] if roomy else ["echo."]
         fragments = []
         for index, left in enumerate(left_rows):
             if orb:
@@ -1160,6 +1177,13 @@ class TerminalChat:
                         entry.status += f" · exit {value['exit_code']}"
                     entry.done = True
                     self.current.pop((actor, "tool"), None)
+        elif kind == "input_rejected" and actor == "Echo":
+            for entry in reversed(self.entries):
+                if entry.kind == "user":
+                    self.entries.remove(entry)
+                    break
+            if not self.editor.text:
+                self.editor.text = value["prompt"]
         elif kind in {"model_end", "run_end"}:
             for key in list(self.current):
                 if key[0] == actor and (key[1] != "tool" or kind == "run_end"):
@@ -1214,6 +1238,35 @@ class TerminalChat:
         self.app.layout.focus(self.editor)
         self.app.invalidate()
 
+    def open_model_settings(self):
+        if getattr(self.agent, "running", False) or self.approval or self.pending_session:
+            return
+        if self.copy_mode:
+            self.toggle_copy()
+        if self.selected:
+            self.close_details()
+        self.model_settings = ModelSettings(
+            self.agent.model.config, self.save_model_settings, self.close_model_settings,
+        )
+        self.app.layout.update_parents_relations()
+        self.app.layout.focus(self.model_settings.profile.control)
+        self.app.invalidate()
+
+    def close_model_settings(self):
+        self.model_settings = None
+        self.app.layout.focus(self.editor)
+        self.app.invalidate()
+
+    def save_model_settings(self, config, *, make_default=True):
+        self.agent.update_model(config, make_default=make_default)
+        self.renderer.configure(self.agent, plain=self.renderer.plain)
+        self.close_model_settings()
+        self.add("notice", "Model settings saved",
+                 f"{config.provider}/{config.model} · reasoning "
+                 f"{config.reasoning_effort or ('default' if config.reasoning_enabled else 'off')}"
+                 + ("\nSaved as the default for new sessions." if make_default
+                    else "\nSaved for this session only."))
+
     async def submit(self, text):
         self.transcript.clear_selection()
         self.transcript.follow = True
@@ -1237,6 +1290,9 @@ class TerminalChat:
             return
         if text == "/help":
             self.open_details(self.help_entry())
+            return
+        if text in {"/model", "/settings"}:
+            self.open_model_settings()
             return
         if text == "/status":
             self.add(

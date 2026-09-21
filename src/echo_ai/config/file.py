@@ -1,31 +1,16 @@
-"""Configuration file structure and explicit environment loading."""
+"""YAML settings, packaged model presets, and credential discovery."""
 
 import os
 from importlib.resources import files
 from pathlib import Path
 
 import yaml
-from dotenv import load_dotenv
+from dotenv import dotenv_values
+
+from echo_ai.config.settings import MODEL_FIELDS
 
 YAML_SECTIONS = {
-    "local-model": {
-        "base_url",
-        "model",
-        "provider",
-        "api_key_env",
-        "request_format",
-        "reasoning_effort",
-        "preserve_thinking",
-        "reasoning_enabled",
-        "return_reasoning",
-        "context_tokens",
-        "max_tokens",
-        "max_context_chars",
-        "timeout",
-        "temperature",
-        "top_p",
-        "top_k",
-    },
+    "local-model": MODEL_FIELDS,
     "agent": {"max_steps", "child_max_steps"},
     "sandbox": {
         "sandbox_image",
@@ -73,32 +58,48 @@ def config_dir():
     return root / "echo-ai"
 
 
-def config_path():
-    if "ECHO_CONFIG_FILE" in os.environ:
-        return Path(os.environ["ECHO_CONFIG_FILE"]).expanduser()
+def config_path(environment=None):
+    environment = os.environ if environment is None else environment
+    if "ECHO_CONFIG_FILE" in environment:
+        return Path(environment["ECHO_CONFIG_FILE"]).expanduser()
     local = Path("echo.yaml")
     return local if local.exists() else config_dir() / "echo.yaml"
 
 
 def environment_path():
-    return Path(os.getenv("ECHO_ENV_FILE", str(config_dir() / ".env"))).expanduser()
+    if "ECHO_ENV_FILE" in os.environ:
+        return Path(os.environ["ECHO_ENV_FILE"]).expanduser()
+    local = Path.cwd() / ".env"
+    return local if local.is_file() else config_dir() / ".env"
 
 
-def load_environment():
-    """Load global credentials or an explicit file, never an incidental project .env."""
+def load_environment(*, api_key_env=None, with_sources=False):
+    """Shell > explicit file, or project .env > global .env; never execute shell code."""
     path = environment_path()
     if "ECHO_ENV_FILE" in os.environ and not path.is_file():
         raise ValueError(f"Configuration file does not exist: {path}")
-    load_dotenv(path, override=False)
+    paths = [path] if "ECHO_ENV_FILE" in os.environ else [path, config_dir() / ".env"]
+    values, sources = {}, {}
+    for source in reversed(list(dict.fromkeys(paths))):
+        if source.is_file():
+            for name, value in dotenv_values(source).items():
+                if value is not None and (
+                    name.startswith("ECHO_") or name.endswith("_API_KEY") or name == api_key_env
+                ):
+                    values[name] = value
+                    sources[name] = str(source)
+    values.update(os.environ)
+    sources.update({name: "shell" for name in os.environ})
+    return (values, sources) if with_sources else values
 
 
 def builtin_profiles():
-    return files("echo_ai.config") / "templates" / "models"
+    return files("echo_ai.config") / "presets"
 
 
 def builtin_profile_names():
     return sorted(p.name.removesuffix(".yaml") for p in builtin_profiles().iterdir()
-                  if p.name.endswith(".yaml") and p.is_file())
+                  if p.name.endswith(".yaml") and p.name != "echo.yaml" and p.is_file())
 
 
 def read_model_profile(path):
@@ -123,9 +124,10 @@ def read_model_profile(path):
     return model, deployment
 
 
-def read_document(path=None, *, use_environment=True):
-    explicit = path is not None or "ECHO_CONFIG_FILE" in os.environ
-    path = Path(path) if path is not None else config_path()
+def read_document(path=None, *, environment=None):
+    environment = os.environ if environment is None else environment
+    explicit = path is not None or "ECHO_CONFIG_FILE" in environment
+    path = Path(path) if path is not None else config_path(environment)
     if not explicit and not path.exists():
         document = {}
     else:
@@ -137,20 +139,4 @@ def read_document(path=None, *, use_environment=True):
         document = {}
     if not isinstance(document, dict):
         raise ValueError("configuration must be a YAML mapping")  # noqa: TRY004
-    profile = document.pop("model-profile", "")
-    if use_environment:
-        profile = os.getenv("ECHO_MODEL_PROFILE", profile)
-    if profile:
-        if not isinstance(profile, str):
-            raise ValueError("model-profile must be a path string")
-        profile_path = profile
-        if not profile.startswith("builtin:"):
-            profile_path = Path(profile).expanduser()
-            if not profile_path.is_absolute():
-                profile_path = path.parent / profile_path
-        model, _ = read_model_profile(profile_path)
-        overrides = document.get("local-model", {})
-        if not isinstance(overrides, dict):
-            raise ValueError("local-model must be a YAML mapping")
-        document["local-model"] = {**model, **overrides}
     return document

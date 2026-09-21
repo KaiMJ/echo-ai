@@ -32,18 +32,19 @@ GPU counts, and cache variables without requiring Docker or a configured cache.
 
 ## Connect Echo
 
-Run `echo-ai setup --edit` to select the matching profile in your user configuration
-(`model-profile: builtin:qwen` or `model-profile: builtin:gemma`). Set `local-model.base_url`
-to your server URL; the default is `http://127.0.0.1:8001/v1`.
+Launch Echo and use `/model` to select Qwen or Gemma. Set the endpoint in the
+picker to your server URL, or leave it empty to use `ECHO_INFERENCE_PORT`
+(default `http://127.0.0.1:8001/v1`). Save before checking `echo-ai status`.
 
 From your target project:
 
 ```bash
-echo-ai status
 echo-ai
+# After saving your selection in /model:
+echo-ai status
 ```
 
-The checkout's `echo.yaml` is separate from installed user settings.
+An optional project `echo.yaml` overrides the global YAML settings.
 See [configuration](configuration.md) for local development.
 
 ## Manage the server
@@ -76,7 +77,7 @@ server, or `config` to inspect the generated Compose configuration.
 
 ## Custom settings
 
-Templates live in `src/echo_ai/config/templates/models/`; both Echo and the
+Presets live in `src/echo_ai/config/presets/`; both Echo and the
 launcher read them directly. There is no separate repository or user `models/`
 folder to maintain. Built-in defaults follow the installed package version;
 resumed sessions retain their saved runtime settings.
@@ -85,13 +86,13 @@ Put request overrides under `local-model` in your `echo.yaml`. For custom GPU or
 server settings, copy a template to a file you own and pass it explicitly:
 
 ```bash
-cp src/echo_ai/config/templates/models/qwen.yaml ./my-model.yaml
+cp src/echo_ai/config/presets/qwen.yaml ./my-model.yaml
 # Edit my-model.yaml for your hardware, then:
 uv run python scripts/deploy_local_model.py qwen up --profile ./my-model.yaml
 ```
 
-Set Echo's `model-profile` to that same file (absolute, or relative to your
-`echo.yaml`) so client and server limits agree. Server changes require restarting
+Use `/model` to set the same model ID and token limits in Echo so client and
+server limits agree. Server changes require restarting
 inference. Model weights stay in your external cache.
 
 See [model verification](../development/model-verification.md) for integration checks.

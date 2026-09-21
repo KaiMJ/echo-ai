@@ -69,6 +69,8 @@ class Renderer:
         self.model = ""
         self.session = ""
         self.calls = self.tools = self.output_tokens = 0
+        self.cost_usd = 0.0
+        self.estimated_cost_calls = self.unknown_cost_calls = 0
         self.ttft: float | None = None
         self.remaining: int | None = None
         self.max_steps = 0
@@ -76,6 +78,8 @@ class Renderer:
         self.event_handler = None
 
     def configure(self, agent, *, plain=False):
+        self.cost_usd = 0.0
+        self.estimated_cost_calls = self.unknown_cost_calls = 0
         self.main = Activity()
         self.child = None
         self.session = agent.session_id
@@ -87,6 +91,8 @@ class Renderer:
         self.plain = plain
 
     def start(self):
+        self.cost_usd = 0.0
+        self.estimated_cost_calls = self.unknown_cost_calls = 0
         self.started = time.monotonic()
         self.elapsed = 0
         self.calls = self.tools = self.output_tokens = 0
@@ -123,7 +129,16 @@ class Renderer:
             self.live = None
         summary = f"{status.capitalize()} · {self.elapsed:.1f}s · {self.calls} model calls"
         summary += f" · {self.tools} tools · {self.output_tokens:,} output tokens"
+        summary += " · " + self.cost_text()
         self.print(Text(summary, style="dim"))
+
+    def cost_text(self):
+        from echo_ai.runtime.pricing import format_cost
+
+        summary = format_cost(self.cost_usd, estimated=bool(self.estimated_cost_calls))
+        if self.unknown_cost_calls:
+            summary += f" · {self.unknown_cost_calls} calls unpriced"
+        return summary
 
     def flush(self, activity):
         if not activity.text and not activity.reasoning:
@@ -198,6 +213,16 @@ class Renderer:
             activity.requested = True
             self.remaining = value["remaining"]
             self.max_steps = value["max_steps"]
+        elif kind == "input_rejected":
+            activity.context = value["context_chars"] // 3
+            activity.estimated = bool(activity.context)
+            activity.requested = False
+            activity.generated_tokens = activity.reasoning_tokens = None
+        elif kind == "model_cost":
+            cost = value.get("cost_usd")
+            self.cost_usd += cost if cost is not None else 0
+            self.estimated_cost_calls += value.get("cost_source") == "estimated"
+            self.unknown_cost_calls += cost is None
         elif kind == "model_end":
             usage = value["usage"]
             activity.requested = True

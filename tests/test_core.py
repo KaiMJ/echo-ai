@@ -65,7 +65,9 @@ async def test_reasoning_is_emitted_and_not_stored_as_content():
     message, _ = await model.complete([], [], lambda kind, value: events.append((kind, value)))
     assert message["content"] == "done"
     assert message["reasoning"] == "plan then answer"
-    assert events == [("reasoning", "plan "), ("reasoning", "then answer"), ("text", "done")]
+    assert [(k, v) for k, v in events if k != "model_cost"] == [
+        ("reasoning", "plan "), ("reasoning", "then answer"), ("text", "done")
+    ]
 
 
 async def test_reasoning_is_saved_but_never_sent(tmp_path):

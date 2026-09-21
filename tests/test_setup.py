@@ -20,29 +20,29 @@ def isolated(tmp_path, monkeypatch):
     return tmp_path
 
 
-def test_discovery_and_relative_profiles(isolated, monkeypatch):
+def test_config_discovery(isolated, monkeypatch):
     path, _ = setup()
     assert config_path() == path
-    assert "builtin:qwen" in path.read_text()
+    assert "model-profile" not in path.read_text()
     assert not (path.parent / "models").exists()
-    assert Config.from_env().request_format == "qwen"
+    assert Config.from_env().request_format == Config().request_format
     project = isolated / "echo.yaml"
     project.write_text("agent:\n  max_steps: 7\n")
     assert Config.from_env().max_steps == 7
     assert Config.from_env().model == Config().model  # Selection, never merging.
     monkeypatch.setenv("ECHO_CONFIG_FILE", str(path))
-    assert Config.from_env().request_format == "qwen"
+    assert Config.from_env().request_format == Config().request_format
     monkeypatch.setenv("ECHO_CONFIG_FILE", str(isolated / "missing.yaml"))
     with pytest.raises(ValueError, match="Cannot load"):
         Config.from_env()
 
 
-def test_environment_is_global_or_explicit(isolated, monkeypatch):
+def test_environment_is_project_global_or_explicit(isolated, monkeypatch):
     setup()
     (isolated / ".env").write_text("ECHO_TEMPERATURE=0.2\n")
-    assert Config.from_env().temperature == 1.0
+    assert Config.from_env().temperature == 0.2
     (config_dir() / ".env").write_text("ECHO_TEMPERATURE=0.3\n")
-    assert Config.from_env().temperature == 0.3
+    assert Config.from_env().temperature == 0.2
     monkeypatch.setenv("ECHO_TEMPERATURE", "0.4")
     assert Config.from_env().temperature == 0.4
     monkeypatch.delenv("ECHO_TEMPERATURE")
@@ -77,7 +77,7 @@ async def test_reset_works_with_broken_config_and_environment(isolated, monkeypa
     backups = list(path.parent.glob("echo.yaml.backup-*"))
     assert backups[0].read_text() == "broken: ["
     assert backups[0].stat().st_mode & 0o777 == 0o600
-    assert read_document(path, use_environment=False)["local-model"]
+    assert read_document(path)["sandbox"]["sandbox_image"] == Config().sandbox_image
 
 
 def test_editor_validates_before_replacement(isolated, monkeypatch):
@@ -136,16 +136,6 @@ async def test_config_hides_url_credentials(isolated, monkeypatch, capsys):
     assert "private" not in output and "token" not in output.replace("tokens", "")
     assert "secret-value" not in output
     assert str(config_dir()) in output
-
-
-def test_custom_relative_profile_still_works(isolated):
-    path, _ = setup()
-    (path.parent / "custom.yaml").write_text("model: custom-model\n")
-    path.write_text("model-profile: custom.yaml\nlocal-model:\n  temperature: 0.4\n")
-    assert Config.from_env().model == "custom-model"
-    assert Config.from_env().temperature == 0.4
-    setup()
-    assert "custom.yaml" in path.read_text()
 
 
 def test_unknown_builtin_profile_fails_clearly(isolated):

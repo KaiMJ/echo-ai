@@ -80,4 +80,8 @@ class Theme:
             "permission-target": f"{self.input_foreground} bold",
             "frame.border": self.muted,
             "frame.label": "bold",
+            "dialog.body": f"{self.foreground} bg:{self.background}"
+            if self.background != "default" else composer,
+            "button": composer,
+            "button.focused": f"bg:{self.selection_background} {self.selection_foreground} bold",
         }

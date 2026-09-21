@@ -14,7 +14,7 @@ from echo_ai.config.theme import Theme
 
 
 def validate(path):
-    document = read_document(path, use_environment=False)
+    document = read_document(path)
     Theme.from_mapping(document.pop("theme", {}))
     RuntimeSettings(**yaml_values(document))
 
@@ -26,15 +26,15 @@ def backup(path):
     return Path(name)
 
 
-def write_config(path, content, *, replace=False):
-    """Validate beside the destination so relative model profiles keep their meaning."""
+def write_config(path, content, *, replace=False, keep_backup=True):
+    """Validate and atomically publish a configuration file."""
     descriptor, name = tempfile.mkstemp(suffix=".yaml", prefix=".echo-", dir=path.parent)
     temporary = Path(name)
     try:
         with os.fdopen(descriptor, "w") as output:
             output.write(content)
         validate(temporary)
-        saved = backup(path) if path.exists() and replace else None
+        saved = backup(path) if path.exists() and replace and keep_backup else None
         if replace:
             os.replace(temporary, path)
         else:
@@ -49,10 +49,10 @@ def setup(*, edit=False, reset=False, path=None):
     """Only an explicit path allows setup to modify project/development settings."""
     path = Path(path).expanduser().absolute() if path else config_dir() / "echo.yaml"
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    templates = files("echo_ai.config") / "templates"
+    presets = files("echo_ai.config") / "presets"
     saved = None
     if not path.exists() or reset:
-        content = (templates / "echo.yaml").read_text()
+        content = (presets / "echo.yaml").read_text()
         saved = write_config(path, content, replace=reset)
     if edit:
         editor = shlex.split(os.getenv("VISUAL") or os.getenv("EDITOR") or "vi")

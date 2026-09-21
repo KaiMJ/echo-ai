@@ -23,8 +23,8 @@ ECHO_ENV_FILE=.env ECHO_REASONING_EFFORT=xhigh uv run echo-ai
 ECHO_ENV_FILE=.env ECHO_MAX_TOKENS=32768 uv run echo-ai
 ```
 
-Relative profile paths resolve next to `echo.yaml`. Docker settings come directly
-from the profile; client overrides do not silently change server capacity.
+Choose the matching model in `/model` before testing. Docker settings come directly
+from the deployment profile; client overrides do not silently change server capacity.
 
 ## Verification
 

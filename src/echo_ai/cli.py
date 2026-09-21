@@ -19,8 +19,9 @@ from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Console
 from rich.prompt import Confirm
 
-from echo_ai.config import Config, load_theme, state_dir
-from echo_ai.config.file import config_path, environment_path
+from echo_ai.config import Config, load_theme, state_dir, state_path
+from echo_ai.config.file import config_path, environment_path, load_environment
+from echo_ai.config.preferences import preferences_path
 from echo_ai.runtime.agent import Agent
 from echo_ai.runtime.locking import WorkspaceBusy
 from echo_ai.runtime.model import Model
@@ -189,6 +190,8 @@ async def chat(agent, root):
                 console.print(str(error), markup=False)
         elif text == "/status":
             console.print(status_panel(agent, renderer, theme=load_theme()))
+        elif text in {"/model", "/settings"}:
+            console.print("Model settings are available in the full-screen TUI (F4 or /model).")
         elif text.startswith("/"):
             console.print("Unknown command. Use /help.", style="yellow")
         else:
@@ -196,6 +199,13 @@ async def chat(agent, root):
 
 
 async def status(config, *, sandbox=False):
+    api_key = load_environment(api_key_env=config.api_key_env).get(config.api_key_env)
+    if config.provider == "xai" and not api_key:
+        console.print(
+            f"FAIL  Missing {config.api_key_env}; set it in your shell or the project's .env "
+            "(detected automatically).", markup=False,
+        )
+        return 1
     checks = []
     if sandbox:
         for label, command in (
@@ -213,7 +223,7 @@ async def status(config, *, sandbox=False):
         async with httpx.AsyncClient(timeout=5) as client:
             response = await client.get(
                 config.base_url.rstrip("/") + "/models",
-                headers={"Authorization": f"Bearer {os.getenv(config.api_key_env, 'local')}"},
+                headers={"Authorization": f"Bearer {api_key or 'local'}"},
             )
             response.raise_for_status()
             entries = response.json()["data"]
@@ -315,7 +325,8 @@ async def execute(args):
         if saved:
             console.print(f"Backup: {saved}", markup=False)
         console.print("Edit with echo-ai setup --edit; check the connection with echo-ai status.")
-        console.print("Setup preserves existing settings. No credentials were copied.")
+        console.print("Use /model inside Echo to choose and save your default model.")
+        console.print("No credentials were read or copied.")
         if config_path().absolute() != path.absolute():
             console.print(f"Runtime configuration override: {config_path().absolute()}", markup=False)
         return 0
@@ -325,18 +336,22 @@ async def execute(args):
             raise ValueError("--sandbox-image requires --sandbox")
         config = replace(config, sandbox_image=args.sandbox_image)
     if args.command == "config":
-        path = config_path().resolve()
+        environment = load_environment()
+        path = config_path(environment).resolve()
         console.print(f"Config file: {path}", markup=False)
+        console.print(f"Model preferences: {preferences_path()}", markup=False)
+        console.print(f"Session database: {state_path() / 'sessions.sqlite3'}", markup=False)
         console.print(f"Credential file: {environment_path().resolve()} (contents hidden)", markup=False)
         console.print("YAML: explicit path > project echo.yaml > global echo.yaml > defaults; no merging.")
-        console.print("Shell variables override the selected credential file; both override YAML.")
-        overrides = sorted(name for name in os.environ if name.startswith("ECHO_"))
+        console.print("Model settings: explicit environment > model.yaml preferences > YAML > built-ins.")
+        console.print("Credentials: shell > selected file, or project .env > global .env.")
+        overrides = sorted(name for name in environment if name.startswith("ECHO_"))
         console.print(f"Environment override names: {', '.join(overrides) or '(none)'}", markup=False)
         console.print("Resumed sessions retain runtime settings; theme uses the current YAML.")
         values = asdict(config)
         # URLs may contain embedded passwords or query tokens. Do not print them.
         values["base_url"] = "(configured; hidden)" if config.base_url else "(provider default)"
-        secret = os.getenv(config.api_key_env)
+        secret = load_environment(api_key_env=config.api_key_env).get(config.api_key_env)
         if secret:
             values = {
                 key: value.replace(secret, "[redacted]") if isinstance(value, str) else value
@@ -347,6 +362,7 @@ async def execute(args):
                 **values,
                 "context_char_limit": config.context_char_limit,
                 "theme": asdict(load_theme()),
+                "sources": config.sources,
             }
         )
         return 0
@@ -380,7 +396,7 @@ async def execute(args):
             if pointer:
                 try:
                     session = store.resolve(pointer, repo)
-                    config = Config.from_session(json.loads(session["config"]))
+                    config = Config(**json.loads(session["config"]))
                     if session["mode"] == "local":
                         sandbox = LocalWorkspace.resume(
                             Path(session["workspace"]), session["state_path"], config

@@ -9,21 +9,32 @@ from copy import deepcopy
 import httpx
 
 from echo_ai.config import Config
+from echo_ai.config.file import load_environment
+from echo_ai.runtime.errors import RequestRejected
+from echo_ai.runtime.pricing import cost_usage
+from echo_ai.runtime.tracing import record
 
 
-def request_messages(messages, *, return_reasoning=False):
+def request_messages(messages, *, return_reasoning=False, model_identity=None):
     """Build inference history according to the configured reasoning replay policy."""
-    if return_reasoning:
-        return [dict(message) for message in messages]
-    return [
-        {k: v for k, v in message.items() if k not in {"reasoning", "reasoning_content"}}
-        for message in messages
-    ]
+    history = []
+    for message in messages:
+        replay = return_reasoning and (
+            model_identity is None or message.get("_echo_model", model_identity) == model_identity
+        )
+        excluded = {"_echo_model"}
+        if not replay:
+            excluded.update({"reasoning", "reasoning_content"})
+        history.append({k: v for k, v in message.items() if k not in excluded})
+    return history
 
 
 def completion_kwargs(config, messages, tools):
     """Keep provider-specific parameters at the transport boundary."""
-    history = request_messages(messages, return_reasoning=config.return_reasoning)
+    history = request_messages(
+        messages, return_reasoning=config.return_reasoning,
+        model_identity=f"{config.provider}/{config.model}",
+    )
     if config.request_format == "qwen":
         for message in history:
             reasoning = message.pop("reasoning", None)
@@ -44,11 +55,16 @@ def completion_kwargs(config, messages, tools):
         params.update(tools=deepcopy(tools), tool_choice="auto")
     if config.base_url:
         params["api_base"] = config.base_url
-    key = os.getenv(config.api_key_env)
+    key = load_environment(api_key_env=config.api_key_env).get(config.api_key_env)
     if key:
         params["api_key"] = key
     elif config.provider == "hosted_vllm":
         params["api_key"] = "local"
+    elif config.provider == "xai":
+        raise RequestRejected(
+            f"Missing {config.api_key_env}. Set it in your shell or the selected credential file "
+            "(the current project's .env is detected automatically)."
+        )
     if config.request_format in {"vllm", "qwen"}:
         template = {"enable_thinking": config.reasoning_enabled}
         if config.request_format == "qwen":
@@ -118,19 +134,22 @@ async def completion_chunks(params, transport=None):
     client = None
     stream = None
     try:
-        if params["model"].startswith("hosted_vllm/"):
+        if params["model"].startswith("hosted_vllm/") or transport is not None:
             client = AsyncHTTPHandler()
             await client.client.aclose()
             client.client = httpx.AsyncClient(
                 transport=transport,
                 timeout=params["timeout"],
-                event_hooks={"response": [check_vllm_response]},
+                event_hooks={"response": [check_vllm_response]}
+                if params["model"].startswith("hosted_vllm/") else {},
             )
             params = {**params, "client": client}
         stream = await litellm.acompletion(**params)
         async for chunk in stream:
             yield chunk.model_dump(exclude_none=True)
     except APIError as error:
+        if getattr(error, "status_code", None) in {400, 401, 403, 404, 422, 429}:
+            raise RequestRejected(f"Model request rejected: {error}") from error
         raise RuntimeError(f"Model request failed: {error}") from error
     finally:
         if stream is not None:
@@ -144,17 +163,35 @@ class Model:
         self.config = config
         self.transport = transport
 
+    def check_ready(self):
+        completion_kwargs(self.config, [], [])
+
     async def complete(self, messages: list[dict], tools: list[dict], emit):
+        usage = {}
+        try:
+            return await self._complete(messages, tools, emit, usage)
+        except RequestRejected:
+            usage.update(cost_usd=0.0, cost_source="rejected")
+            raise
+        finally:
+            if "cost_source" not in usage:
+                usage.update(cost_usage(self.config, usage))
+            record("usage", usage)
+            emit("model_cost", usage)
+
+    async def _complete(self, messages, tools, emit, usage):
         started = time.monotonic()
-        text, thinking, calls, usage = "", "", {}, {}
+        text, thinking, calls = "", "", {}
         first_token = None
         finished = False
         params = completion_kwargs(self.config, messages, tools)
+        record("request", {k: v for k, v in params.items() if k not in {"api_key", "api_base"}})
         async with aclosing(completion_chunks(params, self.transport)) as chunks:
             async for chunk in chunks:
+                record("chunk", chunk)
                 if chunk.get("error"):
                     raise RuntimeError(str(chunk["error"]))
-                usage = chunk.get("usage") or usage
+                usage.update(chunk.get("usage") or {})
                 for choice in chunk.get("choices", []):
                     delta = choice.get("delta", {})
                     reasoning = delta.get("reasoning") or delta.get("reasoning_content") or ""
@@ -208,4 +245,6 @@ class Model:
             message["tool_calls"] = ordered
         if thinking:
             message["reasoning"] = thinking
-        return message, {"seconds": time.monotonic() - started, "ttft": first_token, **usage}
+        record("response", message)
+        usage.update(seconds=time.monotonic() - started, ttft=first_token)
+        return message, usage

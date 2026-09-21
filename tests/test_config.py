@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from echo_ai.config import Config
+from echo_ai.config.models import select_profile
 from echo_ai.runtime.model import Model
 
 
@@ -70,14 +71,13 @@ def test_invalid_yaml(clean_config, content):
 
 
 def test_explicit_path_and_defaults(clean_config, monkeypatch):
-    assert Config.from_env() == Config()
+    assert Config.from_env() == select_profile(Config(), "gemma")
     path = clean_config / "custom.yaml"
     monkeypatch.setenv("ECHO_CONFIG_FILE", str(path))
     with pytest.raises(ValueError, match="Cannot load"):
         Config.from_env()
     path.write_text("local-model:\n  model: custom\n")
     assert Config.from_env().model == "custom"
-    assert Config.from_session({}).reasoning_enabled
 
 
 @pytest.mark.parametrize("return_reasoning", [False, True])
@@ -146,7 +146,6 @@ def test_reasoning_replay_yaml_and_env(clean_config, monkeypatch):
     assert Config.from_env().return_reasoning
     monkeypatch.setenv("ECHO_RETURN_REASONING", "false")
     assert not Config.from_env().return_reasoning
-    assert not Config.from_session({}).return_reasoning
 
 
 def test_theme_loads_separately_from_saved_runtime(clean_config):
@@ -159,13 +158,13 @@ def test_theme_loads_separately_from_saved_runtime(clean_config):
     path = clean_config / "echo.yaml"
     path.write_text('theme:\n  accent: "#abcdef"\n  input_background: "#101010"\n')
     config = Config.from_env()
-    assert config == Config()
+    assert config == select_profile(Config(), "gemma")
     assert "theme" not in asdict(config)
     assert load_theme().accent == "#abcdef"
     assert load_theme().styles()["composer"] == "bg:#101010 #eeeeee"
     saved = asdict(config)
     path.write_text('theme:\n  accent: "#123456"\n')
-    assert Config.from_session(saved) == config
+    assert Config(**saved) == config
     assert load_theme().accent == "#123456"
     assert not any("turn-" in key for key in load_theme().styles())
 
