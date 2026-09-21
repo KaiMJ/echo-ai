@@ -3,6 +3,7 @@ import { CopyCommand } from "../components/copy-command";
 import { OrbStudio } from "../components/orb-studio";
 
 const repo = "https://github.com/KaiMJ/echo-ai";
+const guides = `${repo}/blob/main/docs/guides`;
 
 function EchoMark() {
   return (
@@ -33,7 +34,7 @@ export default function Home() {
           <a href="#how-it-works" className="nav-detail">
             How it works
           </a>
-          <a href={`${repo}#quick-start`}>Docs</a>
+          <a href={`${guides}/README.md`}>Docs</a>
           <a className="nav-github" href={repo}>
             GitHub <span aria-hidden="true">↗</span>
           </a>
@@ -152,7 +153,7 @@ export default function Home() {
                 recorded agent edits, then apply them back to your checkout when
                 you’re ready.
               </p>
-              <a className="text-link" href={`${repo}#security--limits`}>
+              <a className="text-link" href={`${guides}/workspaces-and-changes.md`}>
                 Read about sandbox mode <span aria-hidden="true">↗</span>
               </a>
             </div>
@@ -192,7 +193,7 @@ export default function Home() {
               with Echo.
             </h2>
             <p>Clone the source, connect a model, and start a session.</p>
-            <a href={`${repo}#quick-start`} className="text-link">
+            <a href={`${guides}/getting-started.md`} className="text-link">
               Full setup guide <span aria-hidden="true">↗</span>
             </a>
           </div>
@@ -235,7 +236,7 @@ export default function Home() {
         <p>Small by design. Yours to build with.</p>
         <div className="flex gap-6">
           <a href={repo}>GitHub</a>
-          <a href={`${repo}#quick-start`}>Documentation</a>
+          <a href={`${guides}/README.md`}>Documentation</a>
         </div>
       </footer>
     </>

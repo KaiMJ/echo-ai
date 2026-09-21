@@ -80,3 +80,24 @@ def test_latest_without_activity_does_not_pick_empty_session(tmp_path):
             store.resolve("latest", tmp_path)
     finally:
         store.close()
+
+
+def test_session_listing_places_latest_at_bottom(tmp_path):
+    from io import StringIO
+
+    from rich.console import Console
+
+    from echo_ai.ui.commands import sessions_panel, sessions_text
+
+    store = Store(tmp_path / "state.db")
+    try:
+        older = store.create(tmp_path, {}, repo=tmp_path)
+        newer = store.create(tmp_path, {}, repo=tmp_path)
+        store.db.execute("UPDATE sessions SET updated='2000-01-01' WHERE id=?", (older,))
+        text = sessions_text(store, tmp_path)
+        assert text.index(older) < text.index(newer)
+        output = StringIO()
+        Console(file=output, width=100).print(sessions_panel(store, tmp_path))
+        assert output.getvalue().index(older) < output.getvalue().index(newer)
+    finally:
+        store.close()

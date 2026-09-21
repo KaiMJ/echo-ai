@@ -50,13 +50,17 @@ def sessions_text(store, repo=None, *, include_children=False):
         f"{s['id']}  {s['title'] or '(new session)'}\n"
         f"  {s['updated']} UTC · {s['turns']} turns · {s['mode']}"
         f"{' · review' if s['parent_id'] else ''} · {s['repo'] or s['workspace']}"
-        for s in rows
+        for s in reversed(rows)
     )
 
 
 def sessions_panel(store, repo=None, *, current=None, include_children=False, theme=None):
-    theme = theme or Theme()
     rows = store.sessions(repo, include_children=include_children)
+    return session_rows_panel(list(reversed(rows)), current=current, theme=theme)
+
+
+def session_rows_panel(rows, *, current=None, theme=None, clickable=False):
+    theme = theme or Theme()
     table = Table(show_header=False, show_lines=True, expand=True, border_style=theme.muted)
     table.add_column(ratio=1, overflow="fold")
     for session in rows:
@@ -75,7 +79,7 @@ def sessions_panel(store, repo=None, *, current=None, include_children=False, th
     return Panel(
         table if rows else Text("No sessions found.", style="dim"),
         title="Sessions",
-        subtitle="/sessions ID to switch",
+        subtitle="Click to resume · /sessions ID to switch" if clickable else "/sessions ID to switch",
         border_style=theme.accent,
     )
 

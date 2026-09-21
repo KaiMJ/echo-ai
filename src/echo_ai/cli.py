@@ -149,7 +149,17 @@ async def chat(agent, root):
             try:
                 session = agent.store.session(agent.session_id)
                 target = agent.store.resolve(text.split(maxsplit=1)[1], session["repo"])
-                return target["id"]
+                console.print(f"Resume {target['title'] or 'New session'} · {target['id']}?", markup=False)
+                while True:
+                    try:
+                        answer = (await prompt.prompt_async("Resume? [Y/N] › ")).strip().lower()
+                    except (EOFError, KeyboardInterrupt):
+                        break
+                    if answer in {"y", "yes"}:
+                        return target["id"]
+                    if answer in {"n", "no"}:
+                        break
+                    console.print("Enter Y to resume or N to cancel.")
             except ValueError as error:
                 console.print(str(error), markup=False)
         elif text == "/diff":
@@ -516,7 +526,10 @@ def build_parser():
                 help="Resume ID, or latest session for this repository",
             )
     p = sub.add_parser("resume", help="Resume a saved session (also: chat --resume)")
-    p.add_argument("session", help="Session ID, unique prefix, or latest")
+    p.add_argument(
+        "session", nargs="?", default="latest",
+        help="Session ID or unique prefix (default: latest non-empty chat)",
+    )
     p.add_argument("--repo", default=".", help="Repository used to resolve latest")
     p.add_argument("--yolo", action="store_true", help="Run tools without approval prompts")
     p = sub.add_parser("diff", help="Show changes from agent edit and write tools")

@@ -50,8 +50,39 @@ def test_mode_label_fits_above_composer(chat):
     for yolo in (False, True):
         chat.agent.permissions.yolo = yolo
         label = "".join(fragment[1] for fragment in chat.mode_label())
-        assert len(label) == 21
+        assert len(label) <= 26
+        assert ("Auto approve" if yolo else "Ask first") in label
         assert label.endswith("Shift+Tab")
+
+
+def test_header_orb_only_appears_when_busy_and_freezes_for_copy(chat, monkeypatch):
+    def text():
+        return "".join(p[1] for p in chat.header())
+
+    assert not any(0x2800 <= ord(c) <= 0x28ff for c in text())
+    chat.task = SimpleNamespace(done=lambda: False)
+    monkeypatch.setattr("echo_ai.ui.terminal.time.monotonic", lambda: 0.0)
+    first = text()
+    assert any(0x2800 <= ord(c) <= 0x28ff for c in first)
+    monkeypatch.setattr("echo_ai.ui.terminal.time.monotonic", lambda: 0.5)
+    assert text() != first
+    chat.toggle_copy()
+    frozen = text()
+    monkeypatch.setattr("echo_ai.ui.terminal.time.monotonic", lambda: 1.0)
+    assert text() == frozen
+    chat.toggle_copy()
+    chat.task = None
+    assert not any(0x2800 <= ord(c) <= 0x28ff for c in text())
+
+
+def test_layout_uses_full_terminal_width_with_small_gutters(chat):
+    from prompt_toolkit.data_structures import Size
+
+    chat.app.output.get_size = lambda: Size(rows=40, columns=180)
+    assert 180 - 2 * chat.side_padding() == 176
+    chat.app.output.get_size = lambda: Size(rows=20, columns=40)
+    assert chat.side_padding() == 2
+    assert "\n" not in "".join(p[1] for p in chat.header())
 
 
 def test_answer_stays_in_place_at_completion(chat):
@@ -284,17 +315,17 @@ asyncio.run(chat(Agent(), Path(sys.argv[1])))
         process.send("first\nsecond\r")
         process.expect("Answer ready")
         # Drag over the answer, then copy without cancelling or closing the view.
-        process.send("\x1b[<0;3;11M\x1b[<32;9;11M\x1b[<0;9;11m")
+        process.send("\x1b[<0;3;13M\x1b[<32;9;13M\x1b[<0;9;13m")
         process.send("\x03")
         process.expect_exact("\x1b]52;c;QW5zd2Vy\x07")  # "Answer", base64 encoded.
         process.send("\x1b")
         # Start on a blank row, beyond its text, and drag back into the answer.
-        process.send("\x1b[<0;23;12M\x1b[<32;3;11M\x1b[<0;3;11m")
+        process.send("\x1b[<0;23;14M\x1b[<32;3;13M\x1b[<0;3;13m")
         process.send("\x03")
         process.expect_exact("\x1b]52;c;QW5zd2VyIHJlYWR5Cg==\x07")
         process.send("\x1b")
-        # User input preserves both lines, plus borders place reasoning on row 8.
-        process.send("\x1b[<0;5;8M\x1b[<0;5;8m")
+        # The three-row header and user bubble place reasoning on row 10.
+        process.send("\x1b[<0;5;10M\x1b[<0;5;10m")
         process.expect("Trace details")
         process.expect("Trace body only visible in popup")
         process.send("\x1bOR")  # F3 releases terminal mouse reporting for native selection.
@@ -399,6 +430,8 @@ async def test_session_list_switch_and_restored_conversation(chat, tmp_path, mon
     results = []
     monkeypatch.setattr(chat.app, "exit", lambda **kwargs: results.append(kwargs["result"]))
     await chat.submit("/sessions " + target[:8])
+    assert results == []
+    await chat.submit("Y")
     assert results == [target]
 
     async def run_async():
@@ -653,12 +686,15 @@ async def test_sessions_are_formatted_with_current_marker(chat, tmp_path):
         store.add(other, {"role": "user", "content": "[red]literal title[/red]"})
         chat.agent.store, chat.agent.session_id = store, current
         await chat.submit("/sessions")
-        entry = chat.entries[-1]
-        assert entry.renderable is not None
-        rendered = "\n".join("".join(p[1] for p in line) for line in entry.markdown_lines(80))
+        assert all(entry.renderable is not None for entry in chat.entries)
+        rendered = "\n".join(
+            "".join(p[1] for p in line)
+            for entry in chat.entries for line in entry.markdown_lines(80)
+        )
         assert "current" in rendered and current in rendered and other in rendered
         assert "[red]literal title[/red]" in rendered
         assert "/sessions ID to switch" in rendered
+        assert [entry.session_target["id"] for entry in chat.entries] == [current, other]
     finally:
         store.close()
 
@@ -672,6 +708,56 @@ async def test_new_command_exits_to_fresh_session(chat, monkeypatch):
     await chat.submit("/new")
     assert results == [NEW_SESSION]
     assert chat.entries[-1].text == "Previous answer"
+
+
+async def test_click_session_confirms_and_cancel_restores_draft(chat, monkeypatch):
+    target = {"id": "other-session", "title": "Earlier work"}
+    chat.add("notice", "Sessions", "Earlier work", session_target=target)
+    chat.editor.text = "unfinished draft"
+    chat.editor.buffer.cursor_position = 4
+    results = []
+    monkeypatch.setattr(chat.app, "exit", lambda **kwargs: results.append(kwargs["result"]))
+
+    def click():
+        lines(chat.transcript)
+        chat.transcript.mouse_handler(MouseEvent(
+            position=Point(x=3, y=0), event_type=MouseEventType.MOUSE_UP,
+            button=MouseButton.LEFT, modifiers=frozenset(),
+        ))
+
+    click()
+    assert chat.pending_session == target and results == []
+    assert chat.app.layout.has_focus(chat.session_choices)
+    confirmation = "".join(part[1] for part in chat.session_confirmation_text())
+    assert "Earlier work" in confirmation and "Resume" in confirmation and "Cancel" in confirmation
+    for _ in range(3):
+        click()
+    assert len(chat.entries) == 1
+    assert chat.editor.text == "unfinished draft"
+    assert chat.editor.buffer.cursor_position == 4
+    await chat.submit("maybe")
+    assert chat.pending_session == target and results == []
+    assert len(chat.entries) == 1
+    chat.app.key_bindings.get_bindings_for_keys(("N",))[-1].handler(None)
+    assert chat.pending_session is None and results == []
+    assert chat.editor.text == "unfinished draft"
+    assert chat.editor.buffer.cursor_position == 4
+    assert chat.app.layout.has_focus(chat.editor)
+    click()
+    chat.app.key_bindings.get_bindings_for_keys(("Y",))[-1].handler(None)
+    assert results == [target["id"]]
+
+
+def test_session_popup_escape_cancels_without_transcript_messages(chat):
+    from prompt_toolkit.keys import Keys
+
+    chat.confirm_session({"id": "other-session", "title": "Earlier work"})
+    chat.confirm_session({"id": "another-session", "title": "Another task"})
+    assert chat.pending_session["id"] == "other-session"
+    chat.app.key_bindings.get_bindings_for_keys((Keys.Escape,))[-1].handler(None)
+    assert chat.pending_session is None
+    assert chat.entries == []
+    assert chat.app.layout.has_focus(chat.editor)
 
 
 @pytest.mark.parametrize("command", ["/exit", "/new"])

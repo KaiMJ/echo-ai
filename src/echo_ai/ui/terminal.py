@@ -38,18 +38,17 @@ from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.syntax import Syntax
 from rich.text import Text
-from rich.theme import Theme as RichTheme
 
 from echo_ai.config import load_theme
 from echo_ai.runtime.permissions import Permissions
 from echo_ai.runtime.revisions import apply_sandbox, move_turn
+from echo_ai.ui.appearance import CODE_THEME, MARKDOWN_THEME, orb_frame
 from echo_ai.ui.commands import (
     COMMANDS,
     NEW_SESSION,
     CommandCompleter,
     help_text,
-    sessions_panel,
-    sessions_text,
+    session_rows_panel,
     status_panel,
     status_text,
 )
@@ -106,7 +105,7 @@ def diff_renderable(patch):
         heading,
         summary,
         Text(""),
-        Syntax(patch, "diff", word_wrap=True, theme="ansi_light", background_color="default"),
+        Syntax(patch, "diff", word_wrap=True, theme=CODE_THEME, background_color="default"),
     )
 
 
@@ -121,6 +120,7 @@ class Entry:
     tool: str = ""
     path: str = ""
     renderable: object = None
+    session_target: dict | None = None
     cache_key: tuple | None = None
     cache: list = field(default_factory=list)
 
@@ -139,7 +139,7 @@ class Entry:
                 force_terminal=True,
                 color_system="truecolor",
                 highlight=False,
-                theme=RichTheme({"markdown.code": "bold", "markdown.code_block": "none"}),
+                theme=MARKDOWN_THEME,
             )
             if self.renderable is not None:
                 console.print(self.renderable)
@@ -154,7 +154,7 @@ class Entry:
                             self.detail,
                             "json",
                             word_wrap=True,
-                            theme="ansi_light",
+                            theme=CODE_THEME,
                             background_color="default",
                         )
                     )
@@ -165,7 +165,7 @@ class Entry:
                     # Read results prefix each source line with its original line number.
                     body = re.sub(r"(?m)^\d+: ", "", body)
                     if PurePath(self.path).suffix.lower() in {".md", ".markdown", ".mdown"}:
-                        console.print(Markdown(body, code_theme="ansi_light"))
+                        console.print(Markdown(body, code_theme=CODE_THEME))
                     else:
                         lexer = Syntax.guess_lexer(self.path, body)
                         console.print(
@@ -173,17 +173,17 @@ class Entry:
                                 body,
                                 lexer,
                                 word_wrap=True,
-                                theme="ansi_light",
+                                theme=CODE_THEME,
                                 background_color="default",
                             )
                         )
                 elif self.tool == "delegate":
-                    console.print(Markdown(body, code_theme="ansi_light"))
+                    console.print(Markdown(body, code_theme=CODE_THEME))
                 else:
                     # Shell output, filenames, and search matches are literal text.
                     console.print(Text(body))
             else:
-                console.print(Markdown(source or "Waiting for output…", code_theme="ansi_light"))
+                console.print(Markdown(source or "Waiting for output…", code_theme=CODE_THEME))
             self.cache = list(split_lines(to_formatted_text(ANSI(output.getvalue()))))
             # Rich appends a newline; don't accumulate empty rows between entries.
             while self.cache and not any(fragment[1] for fragment in self.cache[-1]):
@@ -324,12 +324,21 @@ class TranscriptControl(UIControl):
             return self.show_rows(self.row_cache, height)
         rows = []
         if not self.popup and not entries:
-            for style, text in (
-                ("class:accent", "   _  _     _  _"),
-                ("class:accent", " _/ \\/ \\___/ \\/ \\_"),
-            ):
-                rows.append(([(style, fit_text(text, width))], None))
-            rows = rows[:height]
+            welcome = [
+                ("class:muted", ""),
+                ("class:heading", "echo."),
+                ("class:muted", ""),
+                ("class:heading", "Your code. Your machine. Your Echo."),
+                ("class:muted", ""),
+                ("class:muted", "Ask a question or describe a change."),
+                ("class:muted", "/help commands    /sessions pick up a thread"),
+            ]
+            if height < len(welcome):
+                welcome = welcome[3:]
+            for style, text in welcome[:height]:
+                text = fit_text(text, width)
+                padding = max(0, (width - Text(text).cell_len) // 2)
+                rows.append(([(style, " " * padding + text)], None))
         for entry in entries:
             if entry is None:
                 continue
@@ -350,7 +359,7 @@ class TranscriptControl(UIControl):
                 style = "class:warning"
             suffix = ""
             if entry.expandable:
-                suffix = f" · {entry.status or 'Streaming'}"
+                suffix = "" if entry.done and entry.status == "Done" else f" · {entry.status or 'Streaming'}"
                 if width >= 60:
                     suffix += " · Esc close" if self.popup else " · details"
             suffix_width = Text(suffix).cell_len
@@ -365,7 +374,8 @@ class TranscriptControl(UIControl):
                 else:
                     icon = [("class:success", "✓ ")]
             available = max(0, entry_width - (2 if icon else 0))
-            title = fit_text(entry.title, max(0, available - suffix_width)) + suffix
+            display_title = entry.title.removeprefix("Echo · ") if entry.expandable else entry.title
+            title = fit_text(display_title, max(0, available - suffix_width)) + suffix
             rows.append((icon + [(style, fit_text(title, available))], entry))
             if self.popup or not entry.expandable or not entry.done:
                 lines = entry.markdown_lines(max(1, entry_width if user else width - 1))
@@ -469,7 +479,10 @@ class TranscriptControl(UIControl):
             if 0 <= event.position.y < len(self.visible):
                 entry = self.visible[event.position.y][1]
                 if entry:
-                    if entry.expandable and not self.popup:
+                    if entry.session_target is not None and not self.chat.copy_mode:
+                        if not self.chat.busy and self.chat.approval is None:
+                            self.chat.confirm_session(entry.session_target)
+                    elif entry.expandable and not self.popup:
                         self.chat.open_details(entry)
                         self.chat.details.select_entry(entry)
                     else:
@@ -511,6 +524,7 @@ class TerminalChat:
         self.task = None
         self.approval = None
         self.approval_correction = False
+        self.pending_session = None
         if not hasattr(agent, "permissions"):
             agent.permissions = Permissions()
         agent.permissions.ask = self.ask_permission
@@ -519,6 +533,7 @@ class TerminalChat:
         self.copy_selected = None
         self.copy_time = 0.0
         self.copy_status = ""
+        self.copy_header = []
         self.input_rows = 3
         self.resize_drag = None
         self.transcript = TranscriptControl(self)
@@ -544,10 +559,16 @@ class TerminalChat:
             FormattedTextControl(self.approval_text, focusable=True), height=3,
             style="class:permission",
         )
+        self.session_choices = Window(
+            FormattedTextControl(self.session_confirmation_text, focusable=True),
+            height=3, style="class:permission",
+        )
         keys = KeyBindings()
 
         @keys.add("enter")
         def submit(event):
+            if self.pending_session is not None:
+                return
             if self.approval is not None:
                 if self.approval_correction:
                     message = self.permission_input.text.strip()
@@ -570,7 +591,7 @@ class TerminalChat:
             elif not self.busy:
                 text = self.editor.text.strip()
                 if text:
-                    if text not in {"/exit", "/new"}:
+                    if text not in {"/exit", "/new"} and self.pending_session is None:
                         self.editor.buffer.append_to_history()
                     self.editor.buffer.reset()
                     self.editor.buffer.load_history_if_not_yet_loaded()
@@ -580,8 +601,18 @@ class TerminalChat:
         def newline(event):
             if self.approval_correction:
                 self.permission_input.buffer.insert_text("\n")
-            elif self.approval is None and not self.selected and not self.copy_mode:
+            elif self.approval is None and self.pending_session is None and not self.selected and not self.copy_mode:
                 self.editor.buffer.insert_text("\n")
+
+        @keys.add("y", filter=Condition(lambda: self.pending_session is not None))
+        @keys.add("Y", filter=Condition(lambda: self.pending_session is not None))
+        def resume_session(event):
+            self.resolve_session(True)
+
+        @keys.add("n", filter=Condition(lambda: self.pending_session is not None))
+        @keys.add("N", filter=Condition(lambda: self.pending_session is not None))
+        def decline_session(event):
+            self.cancel_session()
 
         @keys.add("s-tab")
         def toggle_permissions(event):
@@ -616,6 +647,8 @@ class TerminalChat:
                 self.app.invalidate()
             elif self.approval is not None:
                 self.resolve_approval("deny")
+            elif self.pending_session is not None:
+                self.cancel_session()
             elif self.editor.buffer.complete_state is not None:
                 self.editor.buffer.cancel_completion()
             elif self.copy_mode:
@@ -643,7 +676,7 @@ class TerminalChat:
         def copy_all(event):
             self.copy_output(all_entries=True)
 
-        @keys.add("f23", filter=Condition(lambda: not self.selected and not self.copy_mode))
+        @keys.add("f23", filter=Condition(lambda: not self.selected and not self.copy_mode and self.pending_session is None))
         def clear_draft(event):
             self.clear_input()
 
@@ -687,30 +720,40 @@ class TerminalChat:
             title="Permission required",
             style="class:permission",
         )
+        composer = HSplit([
+            Window(height=1, char="─", style="class:user-border"),
+            self.editor,
+            Window(height=1, style="class:composer"),
+        ], style="class:composer")
         body = HSplit(
             [
                 Window(
                     FormattedTextControl(self.header),
-                    height=1,
+                    height=lambda: 3 if self.roomy_header() else 1,
                 ),
-                VSplit([Window(width=2), Window(self.transcript), Window(width=2)]),
+                VSplit([Window(width=self.side_padding), Window(self.transcript), Window(width=self.side_padding)]),
                 VSplit([
+                    Window(width=lambda: max(0, self.side_padding() - 2)),
                     Window(FormattedTextControl(self.composer_hint), height=1, style="class:muted"),
-                    Window(FormattedTextControl(self.mode_label), width=22, height=1),
-                    Window(width=2),
+                    Window(FormattedTextControl(self.mode_label), width=lambda: 26 if self.app.output.get_size().columns >= 60 else 12, height=1),
+                    Window(width=self.side_padding),
                 ]),
                 VSplit(
                     [
-                        Window(width=2),
+                        Window(width=self.side_padding),
                         ConditionalContainer(
-                            Frame(self.editor, title="Drag to resize", style="class:composer-box"),
-                            filter=Condition(lambda: self.approval is None),
+                            composer,
+                            filter=Condition(lambda: self.approval is None and self.pending_session is None),
                         ),
                         ConditionalContainer(
                             permission_panel,
                             filter=Condition(lambda: self.approval is not None),
                         ),
-                        Window(width=2),
+                        ConditionalContainer(
+                            Frame(self.session_choices, title="Resume session?", style="class:permission"),
+                            filter=Condition(lambda: self.pending_session is not None),
+                        ),
+                        Window(width=self.side_padding),
                     ]
                 ),
                 status,
@@ -803,15 +846,15 @@ class TerminalChat:
     def install_resize_handlers(self, app):
         """Capture dragging across panes, using terminal coordinates throughout."""
         info = self.editor.window.render_info
-        if info is None or self.selected or self.copy_mode or self.approval is not None:
+        if info is None or self.selected or self.copy_mode or self.approval is not None or self.pending_session is not None:
             self.resize_drag = None
             return
         handlers = app.renderer.mouse_handlers
         size = app.output.get_size()
         if self.resize_drag is None:
             handlers.set_mouse_handler_for_range(
-                2,
-                max(2, size.columns - 2),
+                self.side_padding(),
+                max(self.side_padding(), size.columns - self.side_padding()),
                 info._y_offset - 1,
                 info._y_offset,
                 self.resize_input,
@@ -845,11 +888,26 @@ class TerminalChat:
         else:
             return NotImplemented
 
+    def side_padding(self):
+        return 2
+
     def status(self):
         if self.copy_mode:
             return self.copy_status
-        self.renderer.console.width = self.app.output.get_size().columns
-        return self.renderer.toolbar(streaming=self.busy).replace("Ctrl-C cancel", "Ctrl+d stop")
+        width = self.app.output.get_size().columns
+        active = self.renderer.active
+        parts = []
+        if active.context is not None and active.capacity:
+            prefix = "~" if active.estimated else ""
+            parts.append(f"Context {prefix}{active.context:,} / {active.capacity:,}")
+        if active.requested:
+            parts.append(active.generated_text())
+        if self.renderer.tools:
+            parts.append(f"{self.renderer.tools} tools")
+        if not parts:
+            parts.append("Session " + safe_text(self.agent.session_id)[:8])
+        parts.append("/status details")
+        return " " * self.side_padding() + fit_text(" · ".join(parts), width - self.side_padding() * 2)
 
     def spinner(self):
         moment = self.copy_time if self.copy_mode else time.monotonic()
@@ -860,6 +918,7 @@ class TerminalChat:
         self.details.clear_selection()
         if not self.copy_mode:
             self.copy_status = self.status()
+            self.copy_header = list(self.header())
             self.copy_time = time.monotonic()
             self.copy_entries = [replace(entry) for entry in self.entries]
             self.copy_selected = replace(self.selected) if self.selected else None
@@ -910,26 +969,49 @@ class TerminalChat:
         entry = next((e for e in reversed(self.entries) if e.expandable), None)
         self.open_details(entry or Entry("notice", "Details", "No tool or reasoning traces yet."))
 
+    def roomy_header(self):
+        size = self.app.output.get_size()
+        return size.columns >= 44 and size.rows >= 18
+
     def header(self):
+        if self.copy_mode:
+            return self.copy_header
         width = self.app.output.get_size().columns
-        session = safe_text(self.agent.session_id)[:8]
-        metadata = f"  /  {self.renderer.model}" if self.renderer.model else ""
-        metadata += f"  /  {session}"
-        icon = self.spinner() if self.busy and not self.copy_mode else "✦"
-        return [
-            ("class:spinner", f" {icon}"),
-            ("class:accent", " Echo"),
-            ("class:muted", fit_text(metadata, width - 7)),
-        ]
+        padding = self.side_padding()
+        available = max(1, width - padding * 2)
+        status = safe_text(self.renderer.active.status) if self.busy else "Ready"
+        roomy = self.roomy_header()
+        orb = orb_frame(time.monotonic()) if self.busy and roomy else None
+        model = safe_text(self.renderer.model) or "Local coding agent"
+        left_rows = ["echo.", fit_text(model, max(1, available - 28)), ""] if roomy else ["echo."]
+        fragments = []
+        for index, left in enumerate(left_rows):
+            if orb:
+                right = (fit_text(status, max(0, available // 2 - 8)) + "  " if index == 1 else "") + orb[index]
+            else:
+                right = (self.spinner() + " " if self.busy else "") + status if index == 0 else ""
+            right = fit_text(right, max(0, available - Text(left).cell_len - 1))
+            gap = max(0, available - Text(left).cell_len - Text(right).cell_len)
+            fragments.extend([
+                ("", " " * padding),
+                ("class:heading" if index == 0 else "class:muted", left),
+                ("", " " * gap), ("class:muted", right),
+            ])
+            if index < len(left_rows) - 1:
+                fragments.append(("", "\n"))
+        return fragments
 
     def mode_label(self):
-        if self.agent.permissions.yolo:
-            return [("", " " * 5), ("class:error", "YOLO"), ("class:muted", " · Shift+Tab")]
-        return [("", " " * 2), ("class:success", "DEFAULT"), ("class:muted", " · Shift+Tab")]
+        auto = self.agent.permissions.yolo
+        label = "Auto approve" if auto else "Ask first"
+        shortcut = " · Shift+Tab" if self.app.output.get_size().columns >= 60 else ""
+        return [("class:error" if auto else "class:muted", label), ("class:muted", shortcut)]
 
     def composer_hint(self):
         width = self.app.output.get_size().columns
-        if self.approval is not None:
+        if self.pending_session is not None:
+            items = ["Y Resume", "N Cancel", "Esc Cancel"]
+        elif self.approval is not None:
             items = ["Permission required", "Choose in the box below"]
         elif self.copy_mode:
             items = ["Select text", "Cmd+C (Mac) / Ctrl+Shift+C (Linux)", "Esc Return"]
@@ -942,7 +1024,7 @@ class TerminalChat:
         else:
             items = ["Enter Send", "Ctrl+J New line", "Ctrl+C Copy"]
             items.append("Ctrl+D Stop" if self.busy else "/help Commands")
-        clear = bool(self.editor.text and self.approval is None and not self.selected and not self.copy_mode)
+        clear = bool(self.editor.text and self.approval is None and self.pending_session is None and not self.selected and not self.copy_mode)
         label = "Ctrl+Shift+U Clear input" if width >= 60 else "Clear input"
         reserved = len(label) + 3 if clear else 0
         available = max(0, width - reserved - 2)
@@ -1095,9 +1177,53 @@ class TerminalChat:
             self.add("notice", "Read-only subagent", value)
         self.app.invalidate()
 
+    def confirm_session(self, target):
+        if self.pending_session is not None or self.approval is not None:
+            return
+        if target["id"] == self.agent.session_id:
+            self.add("notice", "Sessions", "This is already the current session.")
+            return
+        self.pending_session = target
+        self.transcript.clear_selection()
+        self.app.layout.focus(self.session_choices)
+        self.app.invalidate()
+
+    def session_confirmation_text(self):
+        if self.pending_session is None:
+            return ""
+        target = self.pending_session
+        width = max(1, self.app.output.get_size().columns - 8)
+        return [
+            ("class:permission-target", fit_text(safe_text(target['title'] or 'New session'), width)),
+            ("class:muted", f"\n{target['id']}\n"),
+            ("class:success", " Y "), ("", "Resume   "),
+            ("class:error", " N "), ("", "Cancel   "),
+            ("class:muted", "Esc Cancel"),
+        ]
+
+    def resolve_session(self, confirmed):
+        if self.pending_session is None:
+            return
+        target = self.pending_session["id"]
+        self.cancel_session()
+        if confirmed:
+            self.app.exit(result=target)
+
+    def cancel_session(self):
+        self.pending_session = None
+        self.app.layout.focus(self.editor)
+        self.app.invalidate()
+
     async def submit(self, text):
         self.transcript.clear_selection()
         self.transcript.follow = True
+        if self.pending_session is not None:
+            answer = text.strip().lower()
+            if answer in {"y", "yes"}:
+                self.resolve_session(True)
+            elif answer in {"n", "no"}:
+                self.cancel_session()
+            return
         if text == "/exit":
             self.app.exit()
             return
@@ -1124,21 +1250,21 @@ class TerminalChat:
             try:
                 session = self.agent.store.session(self.agent.session_id)
                 if text == "/sessions":
-                    listing = sessions_text(self.agent.store, session["repo"])
-                    self.add(
-                        "notice",
-                        "Sessions",
-                        listing,
-                        renderable=sessions_panel(
-                            self.agent.store,
-                            session["repo"],
-                            current=self.agent.session_id,
-                            theme=self.theme,
-                        ),
-                    )
+                    rows = self.agent.store.sessions(session["repo"], include_children=False)
+                    for row in reversed(rows):
+                        self.add(
+                            "notice", "Sessions", f"{row['title'] or 'New session'}\n{row['id']}",
+                            session_target=row,
+                            renderable=session_rows_panel(
+                                [row], current=self.agent.session_id, theme=self.theme,
+                                clickable=True,
+                            ),
+                        )
+                    if not rows:
+                        self.add("notice", "Sessions", "No sessions found.")
                 else:
                     target = self.agent.store.resolve(text.split(maxsplit=1)[1], session["repo"])
-                    self.app.exit(result=target["id"])
+                    self.confirm_session(target)
             except ValueError as error:
                 self.add("notice", "Error", str(error))
             return

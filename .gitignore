@@ -10,3 +10,9 @@ dist/
 .env
 .env.*
 !.env.example
+
+# Local Google client configuration and generated authorization
+google_credentials.json
+google_token.json
+credentials.json
+token.json

@@ -74,13 +74,13 @@ Sandbox mode copies eligible project files and runs tools against that copy.
 `/diff` shows recorded agent edits on the active conversation branch. `/undo` and
 `/redo` move the branch and merge its file changes. Sandbox `/apply` merges those
 recorded edits into the original project. Bash file changes are outside this
-history. See [Workspaces and file changes](workspaces-and-changes.md) for the
+history. See [Workspaces and file changes](../guides/workspaces-and-changes.md) for the
 design decisions and costs.
 
 Sessions persist their mode, source repository, title, and last activity. Existing
 sessions migrate as sandbox sessions; their source repository remains unknown.
 `chat --resume` selects the last active parent session in the current repository.
-Explicit IDs and unambiguous prefixes can select any session. `/sessions ID` ends
-the current idle chat, closes tools and releases its lock, then opens the selected
+Explicit IDs and unambiguous prefixes can select any session. `/sessions ID` asks
+for confirmation, then ends the current idle chat, closes tools and releases its lock, and opens the selected
 session with saved settings and restores user/assistant messages. Full traces stay
 in SQLite. Switching is unavailable while a turn is running.

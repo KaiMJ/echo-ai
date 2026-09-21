@@ -12,6 +12,8 @@ def test_help_and_resume_arguments():
     assert "Execute one task and exit" in help_
     assert parser.parse_args(["chat", "--resume"]).resume == "latest"
     assert parser.parse_args(["chat", "--resume", "abc"]).resume == "abc"
+    assert parser.parse_args(["resume"]).session == "latest"
+    assert parser.parse_args(["resume", "abc"]).session == "abc"
     assert not parser.parse_args(["chat"]).sandbox
     assert parser.parse_args(["status", "--sandbox"]).sandbox
     assert parser.parse_args(["chat", "--sandbox", "--sandbox-image", "project:dev"]).sandbox_image == "project:dev"
@@ -58,7 +60,10 @@ async def test_plain_session_switch(tmp_path, monkeypatch):
     store = Store(tmp_path / "state.db")
     current = store.create(tmp_path, {}, repo=tmp_path)
     target = store.create(tmp_path, {}, repo=tmp_path)
-    prompts = iter(["/help", "/sessions", "/sessions missing", "/sessions " + target[:8]])
+    prompts = iter([
+        "/help", "/sessions", "/sessions missing", "/sessions " + target[:8],
+        "n", "/sessions " + target[:8], "invalid", "Y",
+    ])
 
     class Prompt:
         async def prompt_async(self, _):
