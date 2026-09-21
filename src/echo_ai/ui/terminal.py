@@ -108,7 +108,7 @@ def diff_renderable(patch):
         heading,
         summary,
         Text(""),
-        Syntax(patch, "diff", word_wrap=True, theme=CODE_THEME, background_color="default"),
+        Syntax(patch, "diff", word_wrap=True, theme=CODE_THEME),
     )
 
 
@@ -158,7 +158,6 @@ class Entry:
                             "json",
                             word_wrap=True,
                             theme=CODE_THEME,
-                            background_color="default",
                         )
                     )
                     console.print()
@@ -177,7 +176,6 @@ class Entry:
                                 lexer,
                                 word_wrap=True,
                                 theme=CODE_THEME,
-                                background_color="default",
                             )
                         )
                 elif self.tool == "delegate":
@@ -584,13 +582,20 @@ class TerminalChat:
             height=3, style="class:permission",
         )
         keys = KeyBindings()
+        permission_active = Condition(
+            lambda: self.approval is not None
+            and not self.approval_correction
+            and self.selected is None
+            and not self.copy_mode
+            and self.app.layout.has_focus(self.permission_choices)
+        )
 
         @keys.add("enter")
         def submit(event):
             if self.pending_session is not None:
                 return
             if self.approval is not None:
-                if self.approval_correction:
+                if self.approval_correction and self.app.layout.has_focus(self.permission_input):
                     message = self.permission_input.text.strip()
                     if message:
                         self.resolve_approval("deny", message)
@@ -619,10 +624,34 @@ class TerminalChat:
 
         @keys.add("c-j")
         def newline(event):
-            if self.approval_correction:
+            if self.approval_correction and self.app.layout.has_focus(self.permission_input):
                 self.permission_input.buffer.insert_text("\n")
             elif self.approval is None and self.pending_session is None and not self.selected and not self.copy_mode:
                 self.editor.buffer.insert_text("\n")
+
+        @keys.add("y", filter=permission_active)
+        @keys.add("Y", filter=permission_active)
+        def approve_once(event):
+            self.resolve_approval("once")
+
+        @keys.add("a", filter=permission_active)
+        @keys.add("A", filter=permission_active)
+        def approve_session(event):
+            if self.approval["rule"]:
+                self.resolve_approval("session")
+
+        @keys.add("n", filter=permission_active)
+        @keys.add("N", filter=permission_active)
+        def deny(event):
+            self.resolve_approval("deny")
+
+        @keys.add("t", filter=permission_active)
+        @keys.add("T", filter=permission_active)
+        def tell_echo(event):
+            self.approval_correction = True
+            self.permission_input.buffer.reset()
+            self.app.layout.focus(self.permission_input)
+            self.app.invalidate()
 
         @keys.add("y", filter=Condition(lambda: self.pending_session is not None))
         @keys.add("Y", filter=Condition(lambda: self.pending_session is not None))
@@ -639,29 +668,13 @@ class TerminalChat:
             self.agent.permissions.yolo = not self.agent.permissions.yolo
             self.app.invalidate()
 
-        @keys.add("y", filter=Condition(lambda: self.approval is not None and not self.approval_correction))
-        def approve_once(event):
-            self.resolve_approval("once")
-
-        @keys.add("a", filter=Condition(lambda: self.approval is not None and not self.approval_correction))
-        def approve_session(event):
-            if self.approval["rule"]:
-                self.resolve_approval("session")
-
-        @keys.add("n", filter=Condition(lambda: self.approval is not None and not self.approval_correction))
-        def deny(event):
-            self.resolve_approval("deny")
-
-        @keys.add("t", filter=Condition(lambda: self.approval is not None and not self.approval_correction))
-        def tell_echo(event):
-            self.approval_correction = True
-            self.permission_input.buffer.reset()
-            self.app.layout.focus(self.permission_input)
-            self.app.invalidate()
-
         @keys.add("escape")
         def close(event):
-            if self.approval_correction:
+            if self.copy_mode:
+                self.toggle_copy()
+            elif self.selected:
+                self.close_details()
+            elif self.approval_correction:
                 self.approval_correction = False
                 self.app.layout.focus(self.permission_choices)
                 self.app.invalidate()
@@ -671,10 +684,6 @@ class TerminalChat:
                 self.cancel_session()
             elif self.editor.buffer.complete_state is not None:
                 self.editor.buffer.cancel_completion()
-            elif self.copy_mode:
-                self.toggle_copy()
-            elif self.selected:
-                self.close_details()
 
         @keys.add("f2")
         @keys.add("escape", "d")
@@ -842,15 +851,14 @@ class TerminalChat:
             parts.append(("class:muted", " Enter sends · Ctrl+J new line · Esc back"))
         else:
             parts.extend([
-                ("class:success", " Y "), ("", "Allow once   "),
-                ("class:error", " N "), ("", "Deny   "),
+                ("class:success", " Y Allow once   "),
+                ("class:error", " N Deny   "),
                 ("class:accent", " T "), ("", "Tell Echo"),
             ])
             if item["rule"]:
                 parts.extend([
                     ("", "\n"),
-                    ("class:success", " A "),
-                    ("", f"Allow ({item['rule']}) for this session"),
+                    ("class:warning", f" A Allow ({item['rule']}) for this session"),
                 ])
         return parts
 
@@ -859,7 +867,8 @@ class TerminalChat:
         self.approval = {"name": name, "args": args, "rule": rule, "future": future}
         self.approval_correction = False
         self.permission_input.buffer.reset()
-        self.app.layout.focus(self.permission_choices)
+        if self.selected is None and self.model_settings is None and self.session_picker is None:
+            self.app.layout.focus(self.permission_choices)
         self.app.invalidate()
         try:
             return await future
@@ -867,7 +876,8 @@ class TerminalChat:
             self.approval = None
             self.approval_correction = False
             self.permission_input.buffer.reset()
-            self.app.layout.focus(self.editor)
+            if self.selected is None and self.model_settings is None and self.session_picker is None:
+                self.app.layout.focus(self.editor)
             self.app.invalidate()
 
     def resolve_approval(self, decision, message=""):
@@ -1139,7 +1149,14 @@ class TerminalChat:
         if self.copy_mode:
             self.toggle_copy()
         self.selected = None
-        self.app.layout.focus(self.editor)
+        if self.approval is not None:
+            self.app.layout.focus(
+                self.permission_input if self.approval_correction else self.permission_choices
+            )
+        elif self.pending_session is not None:
+            self.app.layout.focus(self.session_choices)
+        else:
+            self.app.layout.focus(self.editor)
         self.app.invalidate()
 
     def on_event(self, kind, value):

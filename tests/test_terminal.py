@@ -1096,7 +1096,11 @@ def test_help_uses_actions_without_terminal_protocol_jargon(chat):
         ("tool", "1: plain_identifier", "read", "file.py"),
     ],
 )
-def test_text_and_code_do_not_force_white_on_terminal_background(chat, kind, body, tool, path):
+def test_text_and_code_do_not_force_white_on_terminal_background(
+    chat, monkeypatch, kind, body, tool, path
+):
+    # Exercise ANSI styles even when the test runner disables colors.
+    monkeypatch.delenv("NO_COLOR", raising=False)
     entry = chat.add(kind, "Echo", body, tool=tool, path=path, done=True)
     fragments = [p for line in entry.markdown_lines(80) for p in line]
     assert not any(
@@ -1157,3 +1161,119 @@ def test_composer_hints_have_clean_separators_and_clickable_clear(chat, width):
     assert not any("underline" in p[0] for p in fragments)
     assert len(text) <= width
     assert any(len(p) == 3 and "Clear input" in p[1] for p in fragments)
+
+
+@pytest.mark.parametrize("key,decision", [("y", "once"), ("a", "session"), ("n", "deny")])
+@pytest.mark.parametrize("uppercase", [False, True])
+async def test_permission_shortcuts_accept_both_cases(chat, key, decision, uppercase):
+    import asyncio
+
+    from prompt_toolkit.application.current import set_app
+    from prompt_toolkit.key_binding.key_processor import KeyPress
+
+    pending = asyncio.create_task(chat.ask_permission("bash", {"command": "ls"}, "ls *"))
+    await asyncio.sleep(0)
+    try:
+        with set_app(chat.app):
+            chat.app.key_processor.feed(KeyPress(key.upper() if uppercase else key))
+            chat.app.key_processor.process_keys()
+        assert chat.approval["future"].result() == (decision, "")
+        assert await pending == (decision, "")
+    finally:
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+
+
+@pytest.mark.parametrize("view", ["details", "copy"])
+@pytest.mark.parametrize("open_first", [False, True])
+async def test_permission_shortcuts_wait_until_view_closed(chat, view, open_first):
+    import asyncio
+
+    from prompt_toolkit.application.current import set_app
+    from prompt_toolkit.key_binding.key_processor import KeyPress
+    from prompt_toolkit.keys import Keys
+
+    def open_view():
+        if view == "details":
+            chat.open_details(chat.add("tool", "Result", "previous output"))
+        else:
+            chat.toggle_copy()
+
+    def press(key):
+        with set_app(chat.app):
+            chat.app.key_processor.feed(KeyPress(key))
+            chat.app.key_processor.process_keys()
+
+    if open_first:
+        open_view()
+    pending = asyncio.create_task(chat.ask_permission("bash", {"command": "ls"}, "ls *"))
+    await asyncio.sleep(0)
+    try:
+        if not open_first:
+            open_view()
+        if view == "details":
+            assert chat.app.layout.has_focus(chat.details)
+        for key in "yYaAnNtT":
+            press(key)
+            assert not chat.approval["future"].done()
+            assert not chat.approval_correction
+        press(Keys.Escape)
+        # Flush the ambiguous Esc / Alt prefix without relying on a timer.
+        press(Keys.Ignore)
+        assert chat.selected is None and not chat.copy_mode
+        assert not chat.approval["future"].done()
+        assert chat.app.layout.has_focus(chat.permission_choices)
+        press("N")
+        assert await pending == ("deny", "")
+    finally:
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+
+
+async def test_permission_correction_survives_details_view(chat):
+    import asyncio
+
+    from prompt_toolkit.application.current import set_app
+    from prompt_toolkit.key_binding.key_processor import KeyPress
+    from prompt_toolkit.keys import Keys
+
+    pending = asyncio.create_task(chat.ask_permission("bash", {"command": "ls"}, "ls *"))
+    await asyncio.sleep(0)
+    try:
+        with set_app(chat.app):
+            chat.app.key_processor.feed(KeyPress("T"))
+            chat.app.key_processor.process_keys()
+            assert chat.app.layout.has_focus(chat.permission_input)
+            chat.permission_input.text = "Use another command"
+            chat.open_details(chat.add("tool", "Result", "previous output"))
+            chat.app.key_processor.feed(KeyPress(Keys.ControlM))
+            chat.app.key_processor.process_keys()
+            assert not chat.approval["future"].done()
+            chat.close_details()
+            assert chat.app.layout.has_focus(chat.permission_input)
+            chat.app.key_processor.feed(KeyPress(Keys.ControlM))
+            chat.app.key_processor.process_keys()
+        assert await pending == ("deny", "Use another command")
+    finally:
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+
+
+@pytest.mark.parametrize("preset", ["terminal", "dark", "light"])
+def test_permission_labels_use_semantic_colors(chat, preset):
+    from prompt_toolkit.styles import Style
+
+    from echo_ai.config.theme import Theme
+
+    chat.theme = Theme.from_mapping({"preset": preset})
+    chat.approval = {"name": "bash", "args": {"command": "ls"}, "rule": "ls *"}
+    styles = Style.from_dict(chat.theme.styles())
+    fragments = chat.approval_text()
+    for label, color in (
+        ("Allow once", chat.theme.success),
+        ("Deny", chat.theme.error),
+        ("for this session", chat.theme.warning),
+    ):
+        style = next(style for style, text in fragments if label in text)
+        assert styles.get_attrs_for_style_str(style).color == color.lstrip("#")
+        assert color != "default"

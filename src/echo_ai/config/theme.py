@@ -11,9 +11,9 @@ class Theme:
     input_foreground: str = "#eeeeee"
     accent: str = "default"
     muted: str = "#767676"
-    error: str = "default"
-    warning: str = "default"
-    success: str = "default"
+    error: str = "#d24949"
+    warning: str = "#b08900"
+    success: str = "#2e8b57"
     spinner: str = "default"
     input_background: str = "#262626"
     input_border: str = "#555555"
@@ -39,13 +39,15 @@ class Theme:
             "dark": {
                 "foreground": "#eeeeee", "background": "#000000", "accent": "#ffffff",
                 "muted": "#a3a3a3", "input_background": "#111111", "input_border": "#404040",
+                "success": "#3fb950", "error": "#f85149", "warning": "#d29922",
                 "spinner": "#ffffff", "selection_background": "#eeeeee",
                 "selection_foreground": "#000000",
             },
             "light": {
                 "foreground": "#171717", "background": "#ffffff", "accent": "#000000",
                 "muted": "#626262", "input_foreground": "#171717", "input_background": "#f5f5f5",
-                "input_border": "#b5b5b5", "spinner": "#000000", "selection_background": "#171717",
+                "input_border": "#b5b5b5", "success": "#1a7f37", "error": "#cf222e",
+                "warning": "#9a6700", "spinner": "#000000", "selection_background": "#171717",
                 "selection_foreground": "#ffffff",
             },
         }
