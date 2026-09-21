@@ -161,7 +161,9 @@ class Agent:
                 metrics["model_calls"] += 1
                 try:
                     with trace:
-                        message, usage = await self.model.complete(messages, self.tools, self.emit)
+                        message, usage = await self.model.complete(
+                            messages, self.tools, self.emit, conversation_id=self.session_id,
+                        )
                 finally:
                     cost = trace.usage.get("cost_usd")
                     metrics["cost_usd"] += cost if cost is not None else 0

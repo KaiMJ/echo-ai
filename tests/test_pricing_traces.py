@@ -82,6 +82,41 @@ def test_session_cost_includes_children_and_persists(tmp_path):
     store.close()
 
 
+def test_renderer_shows_turn_and_persisted_session_costs(tmp_path):
+    from io import StringIO
+    from types import SimpleNamespace
+
+    from rich.console import Console
+
+    from echo_ai.ui.renderer import Renderer
+
+    store = Store(tmp_path / "costs.db")
+    session = store.create(tmp_path, {})
+    run = store.start(session)
+    store.finish(run, "completed", {"cost_usd": 1.25, "estimated_cost_calls": 1,
+                                    "unknown_cost_calls": 1})
+    output = StringIO()
+    renderer = Renderer(Console(file=output, width=240))
+    renderer.configure(SimpleNamespace(session_id=session, store=store))
+    renderer.start()
+    assert renderer.cost_text() == "$0.00 USD"
+    assert renderer.cost_text(session=True) == "~$1.25 USD · 1 calls unpriced"
+    renderer.emit("model_cost", {"cost_usd": 0.25, "cost_source": "reported"})
+    renderer.emit("child", "review")
+    renderer.emit("child_model_cost", {"cost_usd": 0.10, "cost_source": "estimated"})
+    renderer.emit("child_model_cost", {"cost_usd": None, "cost_source": "unknown"})
+    renderer.stop("completed")
+    assert "Turn API: ~$0.35 USD · 1 calls unpriced" in output.getvalue()
+    assert "Session API: ~$1.60 USD · 2 calls unpriced" in output.getvalue()
+    renderer.start()
+    assert renderer.cost_text() == "$0.00 USD"
+    assert renderer.cost_text(session=True) == "~$1.60 USD · 2 calls unpriced"
+    other = store.create(tmp_path, {})
+    renderer.configure(SimpleNamespace(session_id=other, store=store))
+    assert renderer.cost_text(session=True) == "$0.00 USD"
+    store.close()
+
+
 async def test_agent_saves_call_trace_and_cost(tmp_path, monkeypatch):
     from types import SimpleNamespace
 

@@ -85,6 +85,16 @@ def test_layout_uses_full_terminal_width_with_small_gutters(chat):
     assert "\n" not in "".join(p[1] for p in chat.header())
 
 
+def test_header_shows_turn_and_session_cost_while_idle_and_busy(chat):
+    chat.renderer.session_cost_usd = 1.25
+    chat.renderer.emit("model_cost", {"cost_usd": 0.25, "cost_source": "reported"})
+    for task in (None, SimpleNamespace(done=lambda: False)):
+        chat.task = task
+        header = "".join(part[1] for part in chat.header())
+        assert "Turn API: $0.25 USD" in header
+        assert "Session API: $1.50 USD" in header
+
+
 def test_answer_stays_in_place_at_completion(chat):
     chat.renderer.emit("reasoning", "**Plan**\n\nInspect the code.")
     chat.renderer.emit("text", "## Result\n\n" + "Answer text.\n" * 12)
@@ -338,17 +348,17 @@ asyncio.run(chat(Agent(), Path(sys.argv[1])))
         process.send("first\nsecond\r")
         process.expect("Answer ready")
         # Drag over the answer, then copy without cancelling or closing the view.
-        process.send("\x1b[<0;3;13M\x1b[<32;9;13M\x1b[<0;9;13m")
+        process.send("\x1b[<0;3;14M\x1b[<32;9;14M\x1b[<0;9;14m")
         process.send("\x03")
         process.expect_exact("\x1b]52;c;QW5zd2Vy\x07")  # "Answer", base64 encoded.
         process.send("\x1b")
         # Start on a blank row, beyond its text, and drag back into the answer.
-        process.send("\x1b[<0;23;14M\x1b[<32;3;13M\x1b[<0;3;13m")
+        process.send("\x1b[<0;23;15M\x1b[<32;3;14M\x1b[<0;3;14m")
         process.send("\x03")
         process.expect_exact("\x1b]52;c;QW5zd2VyIHJlYWR5Cg==\x07")
         process.send("\x1b")
-        # The three-row header and user bubble place reasoning on row 10.
-        process.send("\x1b[<0;5;10M\x1b[<0;5;10m")
+        # The four-row header and user bubble place reasoning on row 11.
+        process.send("\x1b[<0;5;11M\x1b[<0;5;11m")
         process.expect("Trace details")
         process.expect("Trace body only visible in popup")
         process.send("\x1bOR")  # F3 releases terminal mouse reporting for native selection.

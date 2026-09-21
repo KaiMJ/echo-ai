@@ -17,6 +17,43 @@ def xai_config():
     return Config(**values)
 
 
+async def test_xai_cache_routing_survives_resume_and_isolates_sessions(tmp_path, monkeypatch):
+    from test_core import FakeSandbox
+
+    from echo_ai.runtime.agent import Agent
+    from echo_ai.runtime.store import Store
+
+    monkeypatch.setenv("XAI_API_KEY", "test-xai-key")
+    requests = []
+
+    async def chunks(params, transport=None):
+        requests.append(params)
+        yield {"choices": [{"delta": {"content": "Done."}, "finish_reason": "stop"}]}
+
+    monkeypatch.setattr("echo_ai.runtime.model.completion_chunks", chunks)
+    config = xai_config()
+    store = Store(tmp_path / "state.db")
+    try:
+        first = store.create(tmp_path, {})
+        second = store.create(tmp_path, {})
+        model = Model(config)
+        sandbox = FakeSandbox(tmp_path)
+        agent = Agent(model, store, sandbox, first)
+        await agent.run("First message")
+        await agent.run("Follow-up")
+        await Agent(Model(config), store, sandbox, first).run("Resumed")
+        await Agent(model, store, sandbox, second).run("Separate session")
+        assert [p["extra_headers"]["x-grok-conv-id"] for p in requests] == [
+            first, first, first, second,
+        ]
+        assert requests[1]["messages"][:len(requests[0]["messages"])] == requests[0]["messages"]
+        assert "extra_headers" not in completion_kwargs(
+            Config(), [], [], conversation_id=first,
+        )
+    finally:
+        store.close()
+
+
 async def test_xai_stream_tool_round_trip(monkeypatch):
     monkeypatch.setenv("XAI_API_KEY", "test-xai-key")
     requests = []
@@ -24,6 +61,7 @@ async def test_xai_stream_tool_round_trip(monkeypatch):
     def respond(request):
         assert str(request.url) == "https://api.x.ai/v1/chat/completions"
         assert request.headers["authorization"] == "Bearer test-xai-key"
+        assert request.headers["x-grok-conv-id"] == "session-1"
         body = json.loads(request.content)
         requests.append(body)
         assert "chat_template_kwargs" not in body and "top_k" not in body
@@ -62,14 +100,18 @@ async def test_xai_stream_tool_round_trip(monkeypatch):
         "type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"],
     }}}]
     async with asyncio.timeout(10):
-        first, usage = await model.complete(messages, tools, lambda *_: None)
+        first, usage = await model.complete(
+            messages, tools, lambda *_: None, conversation_id="session-1",
+        )
     assert first["reasoning"] == "Checking."
     assert json.loads(first["tool_calls"][0]["function"]["arguments"]) == {"path": "."}
     assert usage["prompt_tokens"] == 20
     assert usage["cost_usd"] == pytest.approx(0.0000375)
     assert usage["cost_source"] == "reported"
     messages.extend([first, {"role": "tool", "tool_call_id": "call_1", "content": "[]"}])
-    second, _ = await model.complete(messages, tools, lambda *_: None)
+    second, _ = await model.complete(
+        messages, tools, lambda *_: None, conversation_id="session-1",
+    )
     assert second["content"] == "Done."
 
 

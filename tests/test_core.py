@@ -200,7 +200,7 @@ class FakeModel:
         self.responses = iter(messages)
         self.requests = []
 
-    async def complete(self, messages, *_):
+    async def complete(self, messages, *_, conversation_id=None):
         self.requests.append(json.loads(json.dumps(messages)))
         response = next(self.responses)
         if isinstance(response, BaseException):

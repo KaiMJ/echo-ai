@@ -29,7 +29,7 @@ def request_messages(messages, *, return_reasoning=False, model_identity=None):
     return history
 
 
-def completion_kwargs(config, messages, tools):
+def completion_kwargs(config, messages, tools, *, conversation_id=None):
     """Keep provider-specific parameters at the transport boundary."""
     history = request_messages(
         messages, return_reasoning=config.return_reasoning,
@@ -53,6 +53,8 @@ def completion_kwargs(config, messages, tools):
     }
     if tools:
         params.update(tools=deepcopy(tools), tool_choice="auto")
+    if config.provider == "xai" and conversation_id:
+        params["extra_headers"] = {"x-grok-conv-id": conversation_id}
     if config.base_url:
         params["api_base"] = config.base_url
     key = load_environment(api_key_env=config.api_key_env).get(config.api_key_env)
@@ -170,10 +172,10 @@ class Model:
     def check_ready(self):
         completion_kwargs(self.config, [], [])
 
-    async def complete(self, messages: list[dict], tools: list[dict], emit):
+    async def complete(self, messages: list[dict], tools: list[dict], emit, *, conversation_id=None):
         usage = {}
         try:
-            return await self._complete(messages, tools, emit, usage)
+            return await self._complete(messages, tools, emit, usage, conversation_id)
         except RequestRejected:
             usage.update(cost_usd=0.0, cost_source="rejected")
             raise
@@ -183,12 +185,12 @@ class Model:
             record("usage", usage)
             emit("model_cost", usage)
 
-    async def _complete(self, messages, tools, emit, usage):
+    async def _complete(self, messages, tools, emit, usage, conversation_id):
         started = time.monotonic()
         text, thinking, calls = "", "", {}
         first_token = None
         finished = False
-        params = completion_kwargs(self.config, messages, tools)
+        params = completion_kwargs(self.config, messages, tools, conversation_id=conversation_id)
         record("request", {k: v for k, v in params.items() if k not in {"api_key", "api_base"}})
         async with aclosing(completion_chunks(params, self.transport)) as chunks:
             async for chunk in chunks:

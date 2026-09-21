@@ -85,7 +85,7 @@ async def test_agent_records_actual_edit_and_manual_change_stays_out_of_diff(ses
     class Model:
         config = Config()
 
-        async def complete(self, messages, tools, emit):
+        async def complete(self, messages, tools, emit, *, conversation_id=None):
             return next(responses), {"prompt_tokens": 1, "completion_tokens": 1}
 
     agent = Agent(Model(), session.store, session.sandbox, session.session_id)

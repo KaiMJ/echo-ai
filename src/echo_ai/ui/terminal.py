@@ -763,7 +763,7 @@ class TerminalChat:
             [
                 Window(
                     FormattedTextControl(self.header),
-                    height=lambda: 3 if self.roomy_header() else 1,
+                    height=lambda: 4 if self.roomy_header() else 1,
                 ),
                 VSplit([Window(width=self.side_padding), Window(self.transcript), Window(width=self.side_padding)]),
                 VSplit([
@@ -1032,11 +1032,13 @@ class TerminalChat:
         orb = orb_frame(time.monotonic()) if self.busy and roomy else None
         model = safe_text(self.renderer.model) or "Local coding agent"
         cost = "Turn API: " + self.renderer.cost_text()
+        total = "Session API: " + self.renderer.cost_text(session=True)
         left_rows = ["echo.", fit_text(model, max(1, available - 28)),
-                     fit_text(cost, max(1, available - 28))] if roomy else ["echo."]
+                     fit_text(cost, max(1, available - 28)),
+                     fit_text(total, available)] if roomy else ["echo."]
         fragments = []
         for index, left in enumerate(left_rows):
-            if orb:
+            if orb and index < len(orb):
                 right = (fit_text(status, max(0, available // 2 - 8)) + "  " if index == 1 else "") + orb[index]
             else:
                 right = (self.spinner() + " " if self.busy else "") + status if index == 0 else ""

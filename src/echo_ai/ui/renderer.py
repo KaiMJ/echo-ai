@@ -71,6 +71,8 @@ class Renderer:
         self.calls = self.tools = self.output_tokens = 0
         self.cost_usd = 0.0
         self.estimated_cost_calls = self.unknown_cost_calls = 0
+        self.session_cost_usd = 0.0
+        self.session_estimated_cost_calls = self.session_unknown_cost_calls = 0
         self.ttft: float | None = None
         self.remaining: int | None = None
         self.max_steps = 0
@@ -83,6 +85,10 @@ class Renderer:
         self.main = Activity()
         self.child = None
         self.session = agent.session_id
+        store = getattr(agent, "store", None)
+        totals = store.session_cost(self.session) if hasattr(store, "session_cost") else (0.0, 0, 0)
+        (self.session_cost_usd, self.session_estimated_cost_calls,
+         self.session_unknown_cost_calls) = totals
         config = getattr(getattr(agent, "model", None), "config", None)
         if config:
             self.model = config.model.rsplit("/", 1)[-1]
@@ -129,15 +135,20 @@ class Renderer:
             self.live = None
         summary = f"{status.capitalize()} · {self.elapsed:.1f}s · {self.calls} model calls"
         summary += f" · {self.tools} tools · {self.output_tokens:,} output tokens"
-        summary += " · " + self.cost_text()
+        summary += " · Turn API: " + self.cost_text()
+        summary += " · Session API: " + self.cost_text(session=True)
         self.print(Text(summary, style="dim"))
 
-    def cost_text(self):
+    def cost_text(self, *, session=False):
         from echo_ai.runtime.pricing import format_cost
 
-        summary = format_cost(self.cost_usd, estimated=bool(self.estimated_cost_calls))
-        if self.unknown_cost_calls:
-            summary += f" · {self.unknown_cost_calls} calls unpriced"
+        cost, estimated, unknown = (
+            (self.session_cost_usd, self.session_estimated_cost_calls, self.session_unknown_cost_calls)
+            if session else (self.cost_usd, self.estimated_cost_calls, self.unknown_cost_calls)
+        )
+        summary = format_cost(cost, estimated=bool(estimated))
+        if unknown:
+            summary += f" · {unknown} calls unpriced"
         return summary
 
     def flush(self, activity):
@@ -223,6 +234,9 @@ class Renderer:
             self.cost_usd += cost if cost is not None else 0
             self.estimated_cost_calls += value.get("cost_source") == "estimated"
             self.unknown_cost_calls += cost is None
+            self.session_cost_usd += cost if cost is not None else 0
+            self.session_estimated_cost_calls += value.get("cost_source") == "estimated"
+            self.session_unknown_cost_calls += cost is None
         elif kind == "model_end":
             usage = value["usage"]
             activity.requested = True
