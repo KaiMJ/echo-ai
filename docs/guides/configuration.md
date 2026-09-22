@@ -1,6 +1,6 @@
 # Configuration
 
-Choose your provider, model, endpoint, and token limits with **F4** or **`/model`**
+Choose your provider, model, endpoint, and token limits with **`/model`**
 in chat. Changes take effect next turn. **This session + future sessions** saves
 preferences to `model.yaml`; **This session only** leaves future defaults unchanged.
 For first-time setup, see [Getting started](getting-started.md).

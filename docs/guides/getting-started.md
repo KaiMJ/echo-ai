@@ -27,7 +27,7 @@ cd /path/to/your-project
 echo-ai
 ```
 
-Press **F4** or enter **`/model`** to select your provider and model. For a local
+Enter **`/model`** to select your provider and model. For a local
 server, set its endpoint; the default is `http://127.0.0.1:8001/v1`. Save with
 **This session + future sessions** to reuse the selection. Fresh installs default
 to Gemma, which needs a running local server.

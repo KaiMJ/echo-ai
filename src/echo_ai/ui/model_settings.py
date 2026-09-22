@@ -74,9 +74,12 @@ class ModelSettings:
             name: TextArea(multiline=False, wrap_lines=False, height=1, style="class:composer")
             for name in ("model", "max_tokens", "context_tokens", "temperature", "top_p", "timeout", "base_url")
         }
-        presets = [("current", "Current selection")]
+        presets = [("current", f"{config.model} · current")]
         for name in sorted(builtin_profile_names(), key=lambda name: (name != "xai", name)):
             values, _ = read_model_profile(f"builtin:{name}")
+            # Tuning differences do not make the current model a separate choice.
+            if (values.get("provider"), values.get("model")) == (config.provider, config.model):
+                continue
             key = values.get("api_key_env", "ECHO_API_KEY")
             availability = "local server" if values.get("provider") == "hosted_vllm" else (
                 "key available" if load_environment(api_key_env=key).get(key) else "key missing"

@@ -737,11 +737,6 @@ class TerminalChat:
             else:
                 self.app.exit()
 
-        @keys.add("f4")
-        def settings(event):
-            if not self.busy and self.approval is None and self.pending_session is None:
-                self.open_model_settings()
-
         status = Window(FormattedTextControl(self.status), height=1, style="class:muted")
         permission_panel = Frame(
             HSplit([
@@ -954,7 +949,7 @@ class TerminalChat:
         if not parts:
             parts.append("Session " + safe_text(self.agent.session_id)[:8])
         parts.append("/status details")
-        parts.append("F4 /model")
+        parts.append("/model")
         return " " * self.side_padding() + fit_text(" · ".join(parts), width - self.side_padding() * 2)
 
     def spinner(self):
@@ -1369,6 +1364,8 @@ class TerminalChat:
                 session = self.agent.store.session(self.agent.session_id)
                 if text == "/sessions":
                     rows = self.agent.store.sessions(session["repo"], include_children=False)
+                    for row in rows:
+                        row["usage"] = self.agent.store.latest_model_usage(row["id"])
                     if rows:
                         self.session_picker = SessionPicker(
                             rows, self.agent.session_id, self.choose_session,

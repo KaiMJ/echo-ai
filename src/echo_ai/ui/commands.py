@@ -26,7 +26,7 @@ COMMANDS = {
     "/help": "List commands",
     "/new": "Start a fresh session in this repository",
     "/status": "Show session, execution mode, and token usage",
-    "/model": "Choose model, reasoning, and default settings (F4)",
+    "/model": "Choose model, reasoning, and default settings",
     "/yolo": "Allow tools without asking until /default or exit",
     "/default": "Ask before bash, write, and edit calls",
     "/sessions": "List sessions for this repository",

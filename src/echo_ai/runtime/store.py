@@ -245,6 +245,15 @@ class Store:
             "SELECT * FROM model_calls WHERE session_id=? ORDER BY rowid", (session_id,),
         )]
 
+    def latest_model_usage(self, session_id):
+        row = self.db.execute(
+            "SELECT usage FROM model_calls WHERE session_id=? AND status!='rejected' "
+            "AND (json_extract(usage, '$.prompt_tokens') IS NOT NULL "
+            "OR json_extract(usage, '$.completion_tokens') IS NOT NULL) "
+            "ORDER BY rowid DESC LIMIT 1", (session_id,),
+        ).fetchone()
+        return json.loads(row[0]) if row else {}
+
     def model_events(self, call_id):
         return [
             {"event": row["kind"], "data": json.loads(row["payload"]), "time": row["created"]}

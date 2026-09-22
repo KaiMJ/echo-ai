@@ -7,6 +7,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.mouse_events import MouseButton, MouseEventType
+from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import Frame
 
 
@@ -100,6 +101,16 @@ class SessionPicker:
             age = session_age(row.get("updated"), now)
             metadata = f" · {age}" if age else ""
             label = f"{marker}{row['id'][:8]}{current}{metadata}  {row['title'] or 'New session'}"
+            usage = row.get("usage", {})
+            counts = [
+                f"{name} {usage[key]:,}" if usage.get(key) is not None else f"{name} —"
+                for name, key in (("In", "prompt_tokens"), ("Out", "completion_tokens"))
+            ]
+            tokens = " · ".join(counts)
+            left_width = width - get_cwidth(tokens) - 2
+            if left_width >= 12:
+                label = self.fit(label, left_width)
+                label += " " * (width - get_cwidth(label) - get_cwidth(tokens)) + tokens
             fragments.append((
                 "class:selection" if index == self.index else "",
                 self.fit(label, width), click,

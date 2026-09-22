@@ -45,6 +45,50 @@ def make_chat(agent, tmp_path, input=None):
     return chat
 
 
+@pytest.mark.parametrize("profile", ["gemma", "qwen", "xai"])
+def test_unchanged_settings_save_preserves_serialized_config(profile):
+    config = select_profile(Config(), profile)
+    saved = []
+    panel = ModelSettings(config, lambda value, **_: saved.append(value), lambda: None)
+    panel.save()
+    assert not panel.error
+    assert len(saved) == 1
+    assert json.dumps(asdict(saved[0])) == json.dumps(asdict(config))
+
+
+@pytest.mark.parametrize("effort", ["low", "high"])
+def test_current_model_appears_once_with_custom_settings(effort):
+    config = replace(select_profile(Config(), "xai"), reasoning_effort=effort, timeout=123.5)
+    saved = []
+    panel = ModelSettings(config, lambda value, **_: saved.append(value), lambda: None)
+    choices = dict(panel.profile.options)
+    assert "xai" not in choices
+    assert config.model in choices["current"]
+    assert {"gemma", "qwen"} <= choices.keys()
+    panel.profile.value = "gemma"
+    panel.change_profile()
+    panel.profile.value = "current"
+    panel.change_profile()
+    panel.save()
+    assert saved == [config]
+
+
+def test_different_model_from_same_provider_remains_available():
+    config = replace(select_profile(Config(), "xai"), model="grok-4.6")
+    panel = ModelSettings(config, lambda _: None, lambda: None)
+    assert "xai" in dict(panel.profile.options)
+
+
+@pytest.mark.parametrize("field", ["timeout", "temperature", "top_p", "sandbox_cpus"])
+def test_numeric_config_representation_is_stable_on_load(field):
+    integer = Config(**{field: 1})
+    decimal = Config(**{field: 1.0})
+    assert json.dumps(asdict(integer)) == json.dumps(asdict(decimal))
+    assert type(getattr(integer, field)) is float
+    with pytest.raises(ValueError, match=f"Invalid type for {field}"):
+        Config(**{field: True})
+
+
 def test_panel_switch_validate_save_and_resume(agent, tmp_path):
     chat = make_chat(agent, tmp_path)
     chat.editor.text = "draft survives"
@@ -102,6 +146,31 @@ def test_cancel_and_busy_guard(agent, tmp_path):
     assert agent.model.config == original
 
 
+def test_resume_restores_latest_request_tokens(agent, tmp_path):
+    store, session = agent.store, agent.session_id
+    run = store.start(session)
+    for prompt, completion in [(100, 20), (350, 45)]:
+        call = store.start_model_call(session, run, asdict(agent.model.config))
+        store.add_model_event(call, "usage", {
+            "prompt_tokens": prompt, "completion_tokens": completion,
+            "completion_tokens_details": {"reasoning_tokens": 12},
+        })
+        store.add_model_event(call, "end", {"status": "completed"})
+    rejected = store.start_model_call(session, run, asdict(agent.model.config))
+    store.add_model_event(rejected, "end", {"status": "rejected"})
+    chat = make_chat(agent, tmp_path)
+    assert "Context 350 /" in chat.status()
+    assert "Gen 45" in chat.status()
+    assert not chat.renderer.main.estimated
+    assert chat.renderer.main.reasoning_tokens == 12
+    assert chat.renderer.calls == 0  # Restoring usage does not replay events.
+    empty = store.create(tmp_path, asdict(agent.model.config))
+    agent.session_id = empty
+    chat.renderer.configure(agent)
+    assert chat.renderer.main.context is None
+    assert not chat.renderer.main.requested
+
+
 def test_reasoning_and_model_choices(agent):
     panel = ModelSettings(select_profile(agent.model.config, "xai"), lambda _: None, lambda: None)
     assert "none" in dict(panel.reasoning.options)
@@ -157,8 +226,7 @@ async def test_settings_keyboard_navigation_save_cancel_and_modal_isolation(agen
         task = asyncio.create_task(chat.app.run_async())
         try:
             await wait_for(lambda: chat.app.is_running)
-            chat.editor.text = "keep draft"
-            pipe.send_text("\x1bOS")  # F4
+            pipe.send_text("/model\r")
             await wait_for(lambda: chat.model_settings is not None)
             pipe.send_text("\x1b[C")  # Current session -> xAI
             await wait_for(lambda: chat.model_settings.profile.value == "xai")
@@ -191,8 +259,7 @@ async def test_settings_keyboard_navigation_save_cancel_and_modal_isolation(agen
             pipe.send_text("\r")
             await wait_for(lambda: chat.model_settings is None)
             assert agent.model.config.reasoning_effort == "medium"
-            assert chat.editor.text == "keep draft"
-            pipe.send_text("\x1bOS")
+            pipe.send_text("/model\r")
             await wait_for(lambda: chat.model_settings is not None)
             pipe.send_text("\x1b[Z")  # Shift+Tab must navigate, not toggle tool approval.
             await asyncio.sleep(0.05)

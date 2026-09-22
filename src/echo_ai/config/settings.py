@@ -76,6 +76,9 @@ class RuntimeSettings(ModelSettings):
                 valid = type(value) is expected
             if not valid:
                 raise ValueError(f"Invalid type for {field.name}")
+            if expected is float:
+                # YAML integers and form floats must serialize identically.
+                object.__setattr__(self, field.name, float(value))
         if not self.model.strip() or not self.provider.strip():
             raise ValueError("model and provider must not be empty")
         if not self.sandbox_image.strip():

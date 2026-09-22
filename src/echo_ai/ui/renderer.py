@@ -94,6 +94,16 @@ class Renderer:
             self.model = config.model.rsplit("/", 1)[-1]
             self.main.capacity = config.context_tokens
             self.main.return_reasoning = getattr(config, "return_reasoning", False)
+            self.main.output_limit = config.max_tokens
+        usage = store.latest_model_usage(self.session) if hasattr(store, "latest_model_usage") else {}
+        if usage:
+            self.main.context = usage.get("prompt_tokens")
+            self.main.estimated = self.main.context is None
+            self.main.generated_tokens = usage.get("completion_tokens")
+            self.main.requested = self.main.generated_tokens is not None
+            self.main.reasoning_tokens = (usage.get("completion_tokens_details") or {}).get(
+                "reasoning_tokens"
+            )
         self.plain = plain
 
     def start(self):

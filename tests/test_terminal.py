@@ -774,12 +774,16 @@ async def test_sessions_are_formatted_with_current_marker(chat, tmp_path):
         current = store.create(tmp_path, {}, repo=tmp_path)
         other = store.create(tmp_path, {}, repo=tmp_path)
         store.add(other, {"role": "user", "content": "[red]literal title[/red]"})
+        call = store.start_model_call(other, store.start(other), {})
+        store.add_model_event(call, "usage", {"prompt_tokens": 1234, "completion_tokens": 56})
         chat.agent.store, chat.agent.session_id = store, current
         await chat.submit("/sessions")
         rendered = "".join(p[1] for p in chat.session_picker.text())
         assert "current" in rendered and current[:8] in rendered and other[:8] in rendered
         assert "[red]literal title[/red]" in rendered
         assert len(rendered.splitlines()) == 2
+        assert any(line.endswith("In 1,234 · Out 56") for line in rendered.splitlines())
+        assert any(line.endswith("In — · Out —") for line in rendered.splitlines())
         assert chat.entries == []
         assert chat.app.layout.has_focus(chat.session_picker.control)
     finally:
@@ -793,7 +797,8 @@ async def test_session_picker_keyboard_scroll_cancel_and_resume(tmp_path):
 
     rows = [{"id": f"session-{i:02}", "title": f"Task {i}"} for i in range(20)]
     store = SimpleNamespace(session=lambda _: {"repo": str(tmp_path)},
-                            sessions=lambda *args, **kwargs: rows)
+                            sessions=lambda *args, **kwargs: rows,
+                            latest_model_usage=lambda _: {})
 
     async def until(predicate):
         async with asyncio.timeout(3):

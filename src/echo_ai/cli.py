@@ -191,7 +191,7 @@ async def chat(agent, root):
         elif text == "/status":
             console.print(status_panel(agent, renderer, theme=load_theme()))
         elif text in {"/model", "/settings"}:
-            console.print("Model settings are available in the full-screen TUI (F4 or /model).")
+            console.print("Model settings are available in the full-screen TUI (/model).")
         elif text.startswith("/"):
             console.print("Unknown command. Use /help.", style="yellow")
         else:
